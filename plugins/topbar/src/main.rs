@@ -1947,9 +1947,15 @@ unsafe fn desktop_now() -> bool {    BTNS.with_borrow(|b| b.iter().flat_map(|b| 
 }
 
 unsafe fn fs_update(hwnd: HWND) {
-    // the bar never hides itself any more (user preference): not over a fullscreen window, not on an empty desktop,
-    // not when the dock is covered. The timer keeps ticking so any stale hide state unwinds back to "in place".
-    if FULLSCREEN.swap(false, Relaxed) {
+    // the empty-desktop slide-away stays disabled (user preference: the bar sits still on the desktop),
+    // but a TRUE fullscreen app (video, game) gets the whole screen: its own bottom bars must not end up
+    // behind the bar. When fullscreen ends the bar slides back in.
+    let fs = fullscreen_now(hwnd);
+    if FULLSCREEN.swap(fs, Relaxed) != fs {
+        if fs {
+            fly::close_now();
+            hide_tip(hwnd);
+        }
         bar_anim(hwnd);
     }
     if DESK_HIDE.swap(false, Relaxed) {
