@@ -294,7 +294,7 @@ const CALLBACK: u32 = WM_APP + 1;
 const WM_MOUSELEAVE: u32 = 0x02A3; // not exported under the enabled features
 const NO_WINDOW: u32 = 0x0800_0000;
 const BAR_H: i32 = 40;
-const STRIP_W: i32 = 6; // the show-desktop sliver's width at the far right edge, before scaling
+const STRIP_W: i32 = 120; // the show-desktop strip's width at the far right edge (a half-logo panel with color blocks)
 // hit-test results. Buttons (Start, pins, windows) are >= 0 in left-to-right order; tray apps are TAPP + index.
 const NONE: i32 = -1;
 const SEARCH: i32 = -10;
@@ -1002,8 +1002,7 @@ unsafe fn place(hwnd: HWND) {
         if pos() == Pos::Right {
             ShowWindow(STRIP.get(), SW_HIDE);
         } else {
-            SetWindowPos(STRIP.get(), HWND_TOPMOST, cx - sc(STRIP_W), 0, sc(STRIP_W), cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            SetLayeredWindowAttributes(STRIP.get(), 0, 90, LWA_ALPHA);
+            SetWindowPos(STRIP.get(), HWND_TOPMOST, cx - sc(STRIP_W), (cy - sc(220)) / 2, sc(STRIP_W), sc(220), SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
     }
     InvalidateRect(hwnd, null(), 0);
@@ -1944,6 +1943,34 @@ unsafe fn fs_update(hwnd: HWND) {
     // the empty-desktop slide-away stays disabled (user preference: the bar sits still on the desktop),
     // but a TRUE fullscreen app (video, game) gets the whole screen: its own bottom bars must not end up
     // behind the bar. When fullscreen ends the bar slides back in.
+    // explorer can drop our appbar registration (after restarts / kill cycles): the work area stops excluding
+    // the bar, maximized windows cover it and the bar then reads as "fullscreen". Re-assert when that happens.
+    {
+        let (cx, cy) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        let strip = if style() == Style::Dock && !vertical() { 0 } else { bar_h() };
+        let mut wa: RECT = zeroed();
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut wa as *mut _ as *mut _, 0);
+        let ok = match pos() {
+            Pos::Top => wa.top == strip,
+            Pos::Left => wa.left == strip,
+            Pos::Right => wa.right == cx - strip,
+            _ => wa.bottom == cy - strip,
+        };
+        if !ok {
+            appbar_new(hwnd);
+            place(hwnd);
+            // explorer may have dropped the appbar registration entirely (kill/restart cycles) and stopped
+            // honoring ABM_SETPOS: set the work area directly too. When appbars work again, explorer's own
+            // recompute lands on the same value, so the two paths agree.
+            let want = match pos() {
+                Pos::Top => RECT { left: 0, top: strip, right: cx, bottom: cy },
+                Pos::Left => RECT { left: strip, top: 0, right: cx, bottom: cy },
+                Pos::Right => RECT { left: 0, top: 0, right: cx - strip, bottom: cy },
+                _ => RECT { left: 0, top: 0, right: cx, bottom: cy - strip },
+            };
+            set_work_area(want);
+        }
+    }
     let fs = fullscreen_now(hwnd);
     if FULLSCREEN.swap(fs, Relaxed) != fs {
         if fs {
@@ -2849,15 +2876,29 @@ unsafe fn click(h: i32, left: bool, mid: bool) {
                 }),
                 (Some(&w), false) => close_window(w), // right / middle click
                 (Some(&w), true) => {
-                    // like the Windows taskbar: the active app's button minimizes it, a minimized one restores, any other raises
-                    let fg = GetForegroundWindow();
-                    if wins.contains(&fg) && IsIconic(fg) == 0 {
-                        ShowWindow(fg, SW_MINIMIZE);
-                    } else {
-                        if IsIconic(w) != 0 {
-                            ShowWindow(w, SW_RESTORE);
+                    if wins.len() > 1 {
+                        // several instances: the whole group comes to the front (minimized ones restored),
+                        // stacked so the first one ends on top and keeps the focus
+                        for &win in wins.iter() {
+                            if IsIconic(win) != 0 {
+                                ShowWindow(win, SW_RESTORE);
+                            }
                         }
-                        SetForegroundWindow(w);
+                        for &win in wins.iter().rev() {
+                            SetWindowPos(win, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                        }
+                        force_fg(w);
+                    } else {
+                        // like the Windows taskbar: the active app's button minimizes it, a minimized one restores, any other raises
+                        let fg = GetForegroundWindow();
+                        if wins.contains(&fg) && IsIconic(fg) == 0 {
+                            ShowWindow(fg, SW_MINIMIZE);
+                        } else {
+                            if IsIconic(w) != 0 {
+                                ShowWindow(w, SW_RESTORE);
+                            }
+                            SetForegroundWindow(w);
+                        }
                     }
                 }
                 _ => {}
@@ -2944,7 +2985,20 @@ unsafe extern "system" fn strip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             let dc = BeginPaint(hwnd, &mut ps);
             let mut r: RECT = zeroed();
             GetClientRect(hwnd, &mut r);
-            fill(dc, r, pal().line, 0);
+            fill(dc, r, pal().bg, sc(10));
+            // half-logo size: four blue tiles, lit from the top-left
+            let ts = sc(44);
+            let gap = sc(12);
+            let bw = ts * 2 + gap;
+            let ox = ((r.right - bw) / 2).max(sc(6));
+            let oy = ((r.bottom - (ts * 2 + gap)) / 2).max(sc(6));
+            let cols = [[77u8, 157, 224], [42, 130, 205], [42, 130, 205], [0, 103, 192]];
+            for i in 0..4i32 {
+                let cx = ox + (i % 2) * (ts + gap);
+                let cy = oy + (i / 2) * (ts + gap);
+                let c = cols[i as usize];
+                fill(dc, RECT { left: cx, top: cy, right: cx + ts, bottom: cy + ts }, rgb(c[0], c[1], c[2]), sc(12));
+            }
             EndPaint(hwnd, &ps);
             0
         }
@@ -3237,7 +3291,7 @@ fn main() {
         // DOUBLE-CLICK on it shows the desktop (same as Win+D) and a double-click brings the windows back.
         let stc = wide("topbar_strip");
         RegisterClassW(&WNDCLASSW { style: CS_DBLCLKS, lpfnWndProc: Some(strip_proc), hInstance: hi, hCursor: LoadCursorW(null_mut(), IDC_ARROW), lpszClassName: stc.as_ptr(), ..zeroed() });
-        let strip = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, stc.as_ptr(), null(), WS_POPUP, 0, 0, sc(STRIP_W), GetSystemMetrics(SM_CYSCREEN), null_mut(), null_mut(), hi, null());
+        let strip = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, stc.as_ptr(), null(), WS_POPUP, 0, (GetSystemMetrics(SM_CYSCREEN) - sc(220)) / 2, sc(STRIP_W), sc(220), null_mut(), null_mut(), hi, null());
         STRIP.set(strip);
         STRIP_TOP.set(true); // top-level: independent of the bar, spans the screen height at the far right edge
         if !strip.is_null() {
