@@ -996,15 +996,14 @@ unsafe fn place(hwnd: HWND) {
     SetWindowRgn(hwnd, if style() == Style::Dock { CreateRoundRectRgn(0, 0, ww + 1, hh + 1, ww.min(hh), ww.min(hh)) } else { null_mut() }, 1);
     let (sx, sy) = bar_xy();
     SetWindowPos(hwnd, HWND_TOPMOST, sx, sy, ww, hh, SWP_NOACTIVATE);
-    // the show-desktop sliver rides the bar's far right edge (horizontal bars only; a vertical bar has no spare edge)
+    // the show-desktop strip: a slim visible sliver at the far right edge of the screen, independent of the bar
+    // (hidden when the bar itself docks right, since the strip would sit under it)
     if !STRIP.get().is_null() {
-        if vertical() {
+        if pos() == Pos::Right {
             ShowWindow(STRIP.get(), SW_HIDE);
-        } else if STRIP_TOP.get() {
-            let (sx, sy) = bar_xy();
-            SetWindowPos(STRIP.get(), HWND_TOPMOST, sx + ww - sc(STRIP_W), sy, sc(STRIP_W), hh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         } else {
-            SetWindowPos(STRIP.get(), null_mut(), ww - sc(STRIP_W), 0, sc(STRIP_W), hh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            SetWindowPos(STRIP.get(), HWND_TOPMOST, cx - sc(STRIP_W), 0, sc(STRIP_W), cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            SetLayeredWindowAttributes(STRIP.get(), 0, 90, LWA_ALPHA);
         }
     }
     InvalidateRect(hwnd, null(), 0);
@@ -1907,11 +1906,6 @@ unsafe fn bar_step(hwnd: HWND) {
     }
     let (bx, by) = bar_xy();
     SetWindowPos(hwnd, HWND_TOPMOST, bx, by, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
-    // a top-level sliver must follow the bar's own slide-in / slide-out movement
-    if STRIP_TOP.get() && !STRIP.get().is_null() && !vertical() {
-        let (_, w) = bar_x_w();
-        SetWindowPos(STRIP.get(), HWND_TOPMOST, bx + w - sc(STRIP_W), by, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
-    }
     if p == target {
         KillTimer(hwnd, 5);
         if p == 0.0 {
@@ -1955,6 +1949,11 @@ unsafe fn fs_update(hwnd: HWND) {
         if fs {
             fly::close_now();
             hide_tip(hwnd);
+            if !STRIP.get().is_null() {
+                ShowWindow(STRIP.get(), SW_HIDE); // the strip must not cover a fullscreen app's right edge either
+            }
+        } else if !STRIP.get().is_null() {
+            ShowWindow(STRIP.get(), SW_SHOWNA);
         }
         bar_anim(hwnd);
     }
@@ -2928,14 +2927,29 @@ unsafe fn tip_pt(bar: HWND, h: i32) -> (i32, i32) {
     )
 }
 
-/// The invisible sliver at the far right edge of the bar (like Windows' own "show desktop" strip): a click shows the
-/// desktop — the same toggle the Win+D hotkey runs. A child of the bar, so it moves, slides and hides together with it.
+/// The show-desktop strip: a slim visible sliver at the far right edge of the screen. DOUBLE-CLICK toggles the
+/// desktop (the same toggle the Win+D hotkey runs): windows minimize, and a double-click brings them back.
 unsafe extern "system" fn strip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    if msg == WM_LBUTTONUP {
-        winrust_common::desktop::toggle();
+    if msg != 0 && msg == i18n::style::msg() {
+        InvalidateRect(hwnd, null(), 0); // repaint in the new theme
         return 0;
     }
-    DefWindowProcW(hwnd, msg, wp, lp)
+    match msg {
+        WM_LBUTTONDBLCLK => {
+            winrust_common::desktop::toggle();
+            0
+        }
+        WM_PAINT => {
+            let mut ps: PAINTSTRUCT = zeroed();
+            let dc = BeginPaint(hwnd, &mut ps);
+            let mut r: RECT = zeroed();
+            GetClientRect(hwnd, &mut r);
+            fill(dc, r, pal().line, 0);
+            EndPaint(hwnd, &ps);
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
 }
 
 /// Registers the bar as an appbar with explorer (again after explorer restarts: its list starts empty).
@@ -3219,22 +3233,15 @@ fn main() {
         let swc = wide("topbar_alttab");
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(sw_proc), hInstance: hi, lpszClassName: swc.as_ptr(), ..zeroed() });
         SWWND.set(CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, swc.as_ptr(), null(), WS_POPUP, 0, 0, 1, 1, null_mut(), null_mut(), hi, null()));
-        // the show-desktop sliver: a fully transparent (but still clickable) strip at the bar's far right edge.
-        // First as a child of the bar (it then follows every move/hide by itself); if that fails (observed once,
-        // CreateWindowExW -> null with GetLastError 0), as a top-level window that place()/bar_step() position along the bar.
+        // the show-desktop strip: a slim VISIBLE sliver at the far right edge of the screen, spanning its full height.
+        // DOUBLE-CLICK on it shows the desktop (same as Win+D) and a double-click brings the windows back.
         let stc = wide("topbar_strip");
-        RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(strip_proc), hInstance: hi, hCursor: LoadCursorW(null_mut(), IDC_ARROW), lpszClassName: stc.as_ptr(), ..zeroed() });
-        let mut strip = CreateWindowExW(WS_EX_LAYERED, stc.as_ptr(), null(), WS_CHILD | WS_VISIBLE, 0, 0, sc(STRIP_W), bar_h(), hwnd, null_mut(), hi, null());
-        if strip.is_null() {
-            // child creation failed once in the field (null, GetLastError 0): fall back to a top-level sliver
-            STRIP_TOP.set(true);
-            strip = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, stc.as_ptr(), null(), WS_POPUP, 0, 0, sc(STRIP_W), bar_h(), null_mut(), null_mut(), hi, null());
-        }
+        RegisterClassW(&WNDCLASSW { style: CS_DBLCLKS, lpfnWndProc: Some(strip_proc), hInstance: hi, hCursor: LoadCursorW(null_mut(), IDC_ARROW), lpszClassName: stc.as_ptr(), ..zeroed() });
+        let strip = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, stc.as_ptr(), null(), WS_POPUP, 0, 0, sc(STRIP_W), GetSystemMetrics(SM_CYSCREEN), null_mut(), null_mut(), hi, null());
         STRIP.set(strip);
+        STRIP_TOP.set(true); // top-level: independent of the bar, spans the screen height at the far right edge
         if !strip.is_null() {
-            // alpha 0 would make Windows skip the strip in hit testing entirely (invisible AND unclickable);
-            // alpha 1 is imperceptible on screen but still clickable, which is the whole point
-            SetLayeredWindowAttributes(strip, 0, 1, LWA_ALPHA);
+            SetLayeredWindowAttributes(strip, 0, 90, LWA_ALPHA); // subtle but visible and clickable
         }
         let mut ab: APPBARDATA = zeroed();
         ab.cbSize = size_of::<APPBARDATA>() as u32;
