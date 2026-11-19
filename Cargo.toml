@@ -1,38 +1,8 @@
-[package]
-name = "plugin-launcher"
-version = "0.4.1"
-edition = "2024"
-
-[[bin]]
-name = "plugin-launcher"
-path = "src/main.rs"
-test = false # the embedded manifest demands admin: a test exe could not start from a normal shell
-
-[dependencies]
-winrust-common = { path = "common" }
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Graphics_GdiPlus", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
-
-[build-dependencies]
-embed-resource = "3"
-
-# One workspace: one Cargo.lock, one target\ (every exe lands in target\release), shared dependencies are built once.
+# One workspace: one Cargo.lock, shared dependencies built once. Taskbar-only fork: the installer
+# (plugin-launcher) and the other WinRust tools are removed from this repository.
 [workspace]
-members = [
-    "common",
-    "ReShell",
-    "plugins/topbar",
-    "plugins/rtaskmgr-win32",
-    "plugins/rs-du",
-    "plugins/rust-explorer",
-    "plugins/rs-shell",
-    "plugins/wiztree",
-    "plugins/photoview",
-    "plugins/debloat",
-    "plugins/purge",
-]
-# Stay separate projects with their own target\ and Cargo.lock, because they need panic = "unwind" (the profile below is
-# shared by every member): rust-search's service threads must not take the process down, chrome-rs catches panics per page.
-exclude = ["plugins/rust-search", "plugins/chrome-rs"]
+resolver = "3"
+members = ["common", "plugins/topbar"]
 
 [profile.release]
 opt-level = "s"
@@ -40,6 +10,3 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
-
-[profile.release.package.rs-du]
-opt-level = 3 # MFT parsing: speed over size, as before the workspace

@@ -1,146 +1,45 @@
-<p align="center"><img src="assets/logo.svg" alt="WinRust" width="160"></p>
+# WinRust 任务栏定制版（topbar）
 
-# WinRust
+基于 [Lemxy/WinRust](https://github.com/Lemxy/WinRust) v0.3.0 的任务栏（topbar）深度定制。上游是一套完整的 Windows shell 替换（安装器 + 搜索 + 任务管理器 + 文件管理器等），本仓库只保留任务栏本体并做了大幅改进，其余组件已移除。
 
-**A Windows shell written in Rust: faster and lighter than the stock one.** Small native programs (no .NET, no Electron) that replace parts of Windows: the taskbar, File Explorer, file search, Task Manager, plus a disk cleaner, a disk map and a photo viewer. One installer puts them in, one button takes them all out.
+![logo](assets/logo.svg)
 
-English | [Русский](README.ru.md)
+## 功能
 
-<p align="center"><img src="assets/th.jpg" alt="WinRust" width="480"></p>
+- Windows 11 浅色任务栏风格（默认浅色，右键菜单可切深色）
+- 中文界面（%ProgramData%\WinRust\lang.txt = zh / en / ru）
+- Win 徽标置顶头；固定与运行中图标**拖动排序**，像素级跟手，顺序持久化（topbar-order.txt）
+- 开始面板：XP 双栏风——左栏搜索 + 固定项 + 开始菜单文件夹（点击展开），右栏 此电脑 / 文档 / 图片 / 下载 / 网络 / 设置
+- 停靠位置可设：下 / 上 / 左 / 右（左右为竖排栏）
+- 全屏应用自动让位；桌面与普通窗口下常驻不隐藏
+- 托盘图标全部直接显示，不折叠
+- 配置文件全部随 exe 便携
 
-> **Read this first.** WinRust turns off Windows Search, hides the taskbar and can turn off Explorer as the shell. The exe is not code-signed, so SmartScreen will warn you. A restore point is created before install, but try it on a spare machine or a VM first.
+## 构建
 
-## Install
+需要 Rust stable 1.85+（edition 2024），二选一：
 
-1. Download `WinRust.exe` from the [latest release](https://github.com/Lemxy/WinRust/releases/latest) (Windows 10/11, x64).
-2. Run it as administrator.
-3. Press **Install WinRust**. It installs every component, in the right order.
+- MSVC 工具链：`cargo build --release -p topbar`
+- mingw-w64 交叉编译（可在 Linux 云机）：`rustup target add x86_64-pc-windows-gnu` 后 `cargo build --release -p topbar --target x86_64-pc-windows-gnu`
 
-**Update:** download the new `WinRust.exe` from the releases page, run it as administrator and press **Update WinRust**. Installed plugins are updated, missing ones installed; your settings and the saved original Windows values stay.
+产物 `target\release\topbar.exe`（约 700 KB），单文件直接运行；参数 `--restore` 恢复 Windows 任务栏。
 
-The installer is in English. The **Русский** button in its corner (or "WinRust apps in Русский" in the bar's right-click menu) switches every WinRust program to Russian.
+## 配置（与 exe 同层）
 
-## Remove
+| 文件 | 内容 |
+| --- | --- |
+| theme.txt | light / dark（浅色或深色） |
+| topbar-pos.txt | bottom / top / left / right（停靠位置） |
+| topbar-order.txt | 图标拖动后的固定顺序 |
+| topbar-start.txt | 开始面板固定项 |
+| topbar-usage.txt | 启动频率（搜索排序用） |
 
-- **Remove all** in the installer window undoes everything: Windows Search, the taskbar, Explorer and the services come back.
-- One plugin at a time: `plugin-launcher uninstall <plugin>` (see [Command line](#command-line)).
-- **If the screen is left without a taskbar or desktop:** press Ctrl+Alt+Del → Task Manager → Run new task → `explorer.exe`, then run the installer and press Remove all.
+语言切换：%ProgramData%\WinRust\lang.txt 写 zh（中文）/ en / ru。
 
-## What gets installed
+## 右键菜单
 
-| Plugin | What you get | What it changes in Windows |
-|---|---|---|
-| **rust-search** | File search over all NTFS drives, Alt+Space | Disables the Windows Search service, blocks SearchHost.exe, hides the taskbar search box |
-| **rtaskmgr-win32** | Task Manager (Ctrl+Shift+Esc opens it) | `taskmgr.exe` is redirected to it (the system file is untouched). Also installs the **rs-du** disk cleaner |
-| **topbar** | A Windows 11-style bottom bar: windows, clock, volume, menus | Hides the stock taskbar. Also installs **reshell** (hotkeys: Win+1/2/3 and Win+\` switch desktops, Win+D shows the desktop, Win+I opens Settings, Win+E the file manager; brings the taskbar back if the bar dies), **rs-du**, and a block in your PowerShell profile (`zoxide`, `grep`=rg, `ll`=eza, `cat`=bat; does nothing if they are missing) |
-| **rust-explorer** | A file manager with tabs, and the desktop | Folders and drives open in it; **Explorer stops being the shell** (comes back by itself if topbar fails). Disables PcaSvc, InventorySvc, lfsvc, cbdhsvc, sets DoSvc to manual, merges svchost processes. Requires topbar |
-| **wiztree** | A disk-usage map ("WinRust Disk" in Start) | Nothing, apart from the file and a shortcut |
-| **photoview** | A fast photo viewer | Adds it to "Open with" (it does not become the default) |
-| **debloat** | Off: telemetry, Copilot, Recall, Start ads, Edge in the background | Services and registry policies; old values are saved and restored on uninstall. **Command line only:** `install debloat --yes` |
-| chrome-rs | A browser | Not installable yet |
+在栏空白处右键：Windows 设置、任务管理器、停靠位置（下/上/左/右）、深色主题、浅色主题、关闭此栏。
 
-Every change is reversible: uninstall puts back the values that were there before.
+## 致谢
 
-## Styles
-
-The gear at the left end of the bar opens **Style**. The choice applies at once to the bar, the file manager (rust-explorer) and the search window (Alt+Space):
-
-| Style | Look |
-|---|---|
-| **Normal** | Windows 11 blue, the bar at the bottom |
-| **Terminal** | Green on black, Consolas, square corners |
-| **Floating dock** | A pill-shaped bar in the middle; maximized windows get the whole screen, the dock slides away over them and comes back at the bottom edge |
-| **Tiling** | A thin bar at the top, amber accent, square corners; "Tile the windows" puts the open windows side by side |
-
-The choice is stored in `%ProgramData%\WinRust\style.txt`.
-
-## Benchmark
-
-One-off measurements on one machine (Windows 11 IoT Enterprise 10.0.26300, RTX 4060 Laptop, NTFS). Treat them as orders of magnitude, not lab numbers.
-
-| What | Windows | WinRust | Difference |
-|---|---|---|---|
-| File search (rust-search over all of C: vs `dir /s` over one folder) | 8,340 ms | 45 ms | **99.5%** faster |
-| Same vs `Get-ChildItem -Recurse` | 16,200 – 28,600 ms | 45 ms | **99.7–99.8%** faster |
-| Open a folder window (rust-explorer, median of 5 runs) | 420 ms | 60 ms | **86%** faster |
-| Shell memory (topbar + rust-explorer + rs-shell + reshell vs explorer.exe) | 366 MB | 46 MB | **87%** less |
-| Same, plus the search index (53 MB) | 366 MB | 99 MB | **73%** less |
-| File manager binary size | 3,280 KB | 498 KB | **85%** smaller |
-| Task manager binary size | 5,791 KB | 869 KB | **85%** smaller |
-| Idle CPU of the bar (topbar after optimization, % of one core) | 0.00–0.10% (explorer) | 0.05–0.10% | on par with Explorer |
-
-In short: **85–99% faster or smaller in every size/speed test, and equal on idle CPU.** Caveats: rs searches a ready-made MFT index (it pays 53 MB of memory for that), while `dir` and PowerShell walk the disk from scratch; explorer.exe was still running with its windows during the test, so the memory gain is slightly overstated; Windows Search and the stock Task Manager were not compared.
-
-## Screenshots
-
-**Taskbar**
-
-![Taskbar on the desktop](docs/screenshots/taskbar.webp)
-![Taskbar menu](docs/screenshots/taskbar-menu.png)
-
-**Task Manager** (Russian UI)
-
-![Task Manager](docs/screenshots/task-manager.webp)
-
-**File manager**
-
-![File manager](docs/screenshots/explorer.png)
-
----
-
-## For developers
-
-### Layout
-```
-src/            the installer (plugin-launcher.exe)
-  main.rs         the plugin table PLUGINS: name, texts, install/uninstall pair, icon
-  install/        what each plugin changes and how it is undone (one file per plugin)
-  cli.rs, ui.rs   the command line and the window; both call the same install functions
-common/         winrust-common: language switch (t!/tf!), UI styles and palettes, reg.exe output parser, NTFS MFT reader
-plugins/        sources of every plugin, each its own crate
-ReShell/        reshell (desktop hotkeys, topbar safety net), ships with topbar
-payload.txt     the exes embedded into the installer, and where the build puts them
-payload/        those exes once built (not in git)
-scripts/        build, update, release
-```
-Everything is one cargo workspace (one `Cargo.lock`, every exe in `target\release`). `plugins/rust-search` and `plugins/chrome-rs` build separately because they need `panic = "unwind"` (see `Cargo.toml`).
-
-### Build
-Needs Windows x64, Rust stable (1.85+) with the MSVC toolchain.
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build-all.ps1
-```
-Result: `target\release\plugin-launcher.exe`, with every plugin inside. Close a running installer first. Tests: `cargo test --workspace` (and `cargo test` in `plugins\rust-search`). CI runs the same on every push (`.github/workflows/build.yml`).
-
-| Script | What it does |
-|---|---|
-| `build-all.ps1` | everything: plugins → `payload\` → installer |
-| `build-plugins.ps1` | plugins only → `payload\` (no installer rebuild) |
-| `update-plugin.ps1 <plugin>` | rebuild and reinstall one installed plugin without rebuilding the installer (asks for admin via UAC) |
-| `user-mode.ps1`, `dev-update.ps1` | developer mode: run topbar, rust-explorer, rs-shell and reshell from `%LOCALAPPDATA%` on top of Explorer, swap them without admin |
-| `bench.ps1` | the search and Task Manager benchmark |
-| `publish.ps1`, `release.ps1` | commit and push; GitHub release with `WinRust.exe` |
-
-### Command line
-From a terminal **with administrator rights**:
-```
-plugin-launcher list
-plugin-launcher install <plugin> --yes   (without --yes it only prints the warning and changes nothing)
-plugin-launcher update <plugin>          (reinstall from payload\ next to the exe)
-plugin-launcher uninstall <plugin>
-plugin-launcher rollback --yes           (remove everything)
-```
-Exit codes: 0 success, 1 error, 2 bad arguments or no `--yes`. With no arguments the window opens. Install log: `%ProgramData%\plugin-launcher\install.log`.
-
-### Adding a plugin
-1. A crate in `plugins/<name>`, added to `members` in the root `Cargo.toml`.
-2. A line in `payload.txt`.
-3. `src/install/<name>.rs` with an install/uninstall pair (and a `mod` line in `src/install/mod.rs`). Save the original values before changing anything, so uninstall can put them back.
-4. An entry in `PLUGINS` (`src/main.rs`). The window, its height and the command line pick it up on their own.
-
-## 本 Fork 的定制（Customizations）
-
-在上游 v0.3.0 基础上定制了任务栏（topbar）：浅色主题（默认）/深色主题开关、中文界面、图标拖动排序（像素级跟手）、
-XP 双栏风格开始面板（右栏：此电脑/文档/图片/下载/网络/设置）、停靠位置可设（下/上/左/右）、不自动隐藏、配置文件随 exe 便携。
-在栏空白处右键即可调整；深浅色随 theme.txt（与 exe 同目录）。
-
+基于 [Lemxy/WinRust](https://github.com/Lemxy/WinRust)——上游包含完整的 shell 替换套件（搜索、任务管理器、文件管理器、磁盘工具等），本仓库是其任务栏部分的定制分支。
