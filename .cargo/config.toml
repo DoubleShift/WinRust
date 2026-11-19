@@ -1,2 +1,6 @@
 [build]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+[http]
+# this cargo's libcurl picks up the (often dead) Windows system proxy: an empty CURLOPT_PROXY disables that
+proxy = ""

@@ -1,4 +1,4 @@
-﻿<p align="center"><img src="assets/logo.svg" alt="WinRust" width="160"></p>
+<p align="center"><img src="assets/logo.svg" alt="WinRust" width="160"></p>
 
 # WinRust
 
@@ -14,11 +14,7 @@ English | [Русский](README.ru.md)
 
 1. Download `WinRust.exe` from the [latest release](https://github.com/Lemxy/WinRust/releases/latest) (Windows 10/11, x64).
 2. Run it as administrator.
-3. Tick the components you want (all are ticked by default) and press **Install WinRust**. They are installed in the right order; one that fails or is skipped does not stop the others, the window lists what went wrong.
-
-Windows Search is optional: on a stripped Windows (for example a debloated LTSC image without the Windows Search service) that step is skipped with a warning instead of failing the install.
-
-If UAC asks for **another administrator's** password, the per-user settings (startup entries, scheduled tasks, PowerShell profile, search permissions) still go to the user who is signed in, not to the administrator you typed. If the installer cannot tell who that is, it stops before changing anything.
+3. Press **Install WinRust**. It installs every component, in the right order.
 
 **Update:** download the new `WinRust.exe` from the releases page, run it as administrator and press **Update WinRust**. Installed plugins are updated, missing ones installed; your settings and the saved original Windows values stay.
 
@@ -41,7 +37,6 @@ The installer is in English. The **Русский** button in its corner (or "Wi
 | **wiztree** | A disk-usage map ("WinRust Disk" in Start) | Nothing, apart from the file and a shortcut |
 | **photoview** | A fast photo viewer | Adds it to "Open with" (it does not become the default) |
 | **debloat** | Off: telemetry, Copilot, Recall, Start ads, Edge in the background | Services and registry policies; old values are saved and restored on uninstall. **Command line only:** `install debloat --yes` |
-| **purge** | Removes the bundled junk like Tiny11 does: Clipchamp, News, Weather, Xbox overlays, Teams, Cortana, Widgets, Skype and more, plus telemetry tasks | **IRREVERSIBLE, no undo.** Apps are removed for all users and from the image; the Store, Settings, Start and runtimes stay. Run `purge.exe` first: it only lists. **Command line only:** `install purge --yes` (OneDrive and Edge: `purge.exe --apply --onedrive --edge`) |
 | chrome-rs | A browser | Not installable yet |
 
 Every change is reversible: uninstall puts back the values that were there before.
@@ -82,7 +77,6 @@ In short: **85–99% faster or smaller in every size/speed test, and equal on id
 
 ![Taskbar on the desktop](docs/screenshots/taskbar.webp)
 ![Taskbar menu](docs/screenshots/taskbar-menu.png)
-![Bar menu, new look](docs/screenshots/topbar-menu-new.png)
 
 **Task Manager** (Russian UI)
 
@@ -131,15 +125,22 @@ Result: `target\release\plugin-launcher.exe`, with every plugin inside. Close a 
 From a terminal **with administrator rights**:
 ```
 plugin-launcher list
-plugin-launcher install <plugin>... --yes (one or more names, or `all` for what the window installs; without --yes it only prints the warnings and changes nothing)
+plugin-launcher install <plugin> --yes   (without --yes it only prints the warning and changes nothing)
 plugin-launcher update <plugin>          (reinstall from payload\ next to the exe)
 plugin-launcher uninstall <plugin>
 plugin-launcher rollback --yes           (remove everything)
 ```
-Several plugins in one command are installed in the table's order (topbar before rust-explorer); one that fails does not stop the rest. Exit codes: 0 success, 1 error (at least one plugin failed), 2 bad arguments or no `--yes`. With no arguments the window opens. Install log: `%ProgramData%\plugin-launcher\install.log`.
+Exit codes: 0 success, 1 error, 2 bad arguments or no `--yes`. With no arguments the window opens. Install log: `%ProgramData%\plugin-launcher\install.log`.
 
 ### Adding a plugin
 1. A crate in `plugins/<name>`, added to `members` in the root `Cargo.toml`.
 2. A line in `payload.txt`.
 3. `src/install/<name>.rs` with an install/uninstall pair (and a `mod` line in `src/install/mod.rs`). Save the original values before changing anything, so uninstall can put them back.
 4. An entry in `PLUGINS` (`src/main.rs`). The window, its height and the command line pick it up on their own.
+
+## 本 Fork 的定制（Customizations）
+
+在上游 v0.3.0 基础上定制了任务栏（topbar）：浅色主题（默认）/深色主题开关、中文界面、图标拖动排序（像素级跟手）、
+XP 双栏风格开始面板（右栏：此电脑/文档/图片/下载/网络/设置）、停靠位置可设（下/上/左/右）、不自动隐藏、配置文件随 exe 便携。
+在栏空白处右键即可调整；深浅色随 theme.txt（与 exe 同目录）。
+

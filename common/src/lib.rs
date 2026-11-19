@@ -11,17 +11,32 @@ use std::{
 pub mod desktop;
 pub mod mft;
 pub mod reg;
-pub mod settings;
 pub mod style;
 
 static LANG: AtomicU8 = AtomicU8::new(0); // 0 = not read yet, 1 = English, 2 = Russian
+static ZH: AtomicU8 = AtomicU8::new(0); // 0 = not read yet, 1 = Chinese
 
 fn file() -> Option<PathBuf> {
     std::env::var_os("ProgramData").map(|p| PathBuf::from(p).join("WinRust").join("lang.txt"))
 }
 
+/// Chinese UI mode: lang.txt contains "zh" (the topbar's own extension; the installer only writes "en"/"ru").
+pub fn chinese() -> bool {
+    match ZH.load(Relaxed) {
+        1 => true,
+        _ => {
+            let zh = file().and_then(|f| std::fs::read_to_string(f).ok()).is_some_and(|s| s.trim().eq_ignore_ascii_case("zh"));
+            ZH.store(if zh { 1 } else { 0 }, Relaxed);
+            zh
+        }
+    }
+}
+
 /// The current language at run time. In code that has unit tests use `en!()` instead: it is always Russian under `cargo test`.
 pub fn english() -> bool {
+    if chinese() {
+        return false; // "zh" is neither English nor Russian: the program's own zh handling picks the texts
+    }
     match LANG.load(Relaxed) {
         1 => true,
         2 => false,

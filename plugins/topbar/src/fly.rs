@@ -32,6 +32,7 @@ enum Act {
     CalNext,
     CalToday,
     App(usize), // index into the filtered list
+    Place(usize), // index into places(): the system places of the Start panel's right column
     Power(u8),  // 0 lock, 1 sleep, 2 restart, 3 shut down
 }
 
@@ -78,7 +79,10 @@ fn phy_name(t: i32) -> &'static str {
     }
 }
 
-static APPS: Mutex<Vec<(String, Vec<u16>)>> = Mutex::new(Vec::new()); // Start menu shortcuts: (name, .lnk path)
+static APPS: Mutex<Vec<(String, Vec<u16>)>> = Mutex::new(Vec::new()); // Start menu shortcuts: (name, .lnk path); folders sit in front as "dir:<path>" pseudo-entries
+static MENUS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new()); // the Start menu's top-level folders: (name, dir path)
+static ROOTS: Mutex<Vec<String>> = Mutex::new(Vec::new()); // .lnk files at the top level of the Start menu (not inside a folder)
+static EXPF: Mutex<Vec<String>> = Mutex::new(Vec::new()); // folder dir paths the panel has expanded
 static BRIGHT: AtomicI32 = AtomicI32::new(-1); // -1 = no controllable display (desktop PC)
 const ROWS: usize = 11;
 
@@ -97,6 +101,7 @@ thread_local! {
     static OVER: Cell<Option<Act>> = const { Cell::new(None) };
     static DRAG: Cell<u8> = const { Cell::new(0) }; // 0 none, 1 volume slider, 2 brightness slider
     static MENU_X: Cell<i32> = const { Cell::new(0) };
+    static MENU_Y: Cell<i32> = const { Cell::new(0) }; // menu anchor y (used by a vertical bar to keep the menu by its element)
     static CONFIRM: Cell<i32> = const { Cell::new(-1) };
     static LAST: Cell<(Option<Kind>, u64)> = const { Cell::new((None, 0)) }; // which flyout closed when
     static FIN: Cell<(i32, i32)> = const { Cell::new((0, 0)) }; // where the open flyout rests
@@ -130,6 +135,27 @@ pub fn load_apps() {
             walk(&PathBuf::from(b).join(sub), 0, &mut v);
         }
     }
+    // the Start menu's own folders: top-level directories become expandable rows, top-level shortcuts stay loose
+    let mut menus: Vec<(String, String)> = Vec::new();
+    let mut roots: Vec<String> = Vec::new();
+    for (var, sub) in [("ProgramData", r"Microsoft\Windows\Start Menu\Programs"), ("APPDATA", r"Microsoft\Windows\Start Menu\Programs")] {
+        if let Some(b) = std::env::var_os(var) {
+            for e in std::fs::read_dir(&PathBuf::from(b).join(sub)).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    let name = p.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                    if !name.is_empty() && !menus.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) {
+                        menus.push((name, p.to_string_lossy().to_string()));
+                    }
+                } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk")) {
+                    roots.push(p.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    menus.sort_by_key(|a| a.0.to_lowercase());
+    *MENUS.lock().unwrap() = menus;
+    *ROOTS.lock().unwrap() = roots;
     // Store apps (Settings, Calculator, Terminal, Photos...) have no .lnk: the shell's Apps folder lists them
     let have: std::collections::HashSet<String> = v.iter().map(|a| a.0.to_lowercase()).collect();
     for (name, id) in apps_folder() {
@@ -140,7 +166,10 @@ pub fn load_apps() {
     }
     v.sort_by_key(|a| a.0.to_lowercase());
     v.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
-    *APPS.lock().unwrap() = v;
+    // the folders go in front as "dir:<path>" pseudo-entries (launching one expands it instead)
+    let mut full: Vec<(String, Vec<u16>)> = MENUS.lock().unwrap().iter().map(|(n, p)| (n.clone(), wide(&format!("dir:{p}")))).collect();
+    full.append(&mut v);
+    *APPS.lock().unwrap() = full;
 }
 
 /// (display name, app id) of everything in the shell's Apps folder (what the Windows Start menu lists).
@@ -241,9 +270,9 @@ unsafe fn on_files(hw: HWND, hd: HDROP) {
     }
     DragFinish(hd);
     note(&match added.len() {
-        0 => "Already in Start".to_string(),
-        1 => format!("Added to Start: {}", added[0]),
-        n => format!("Added {n} items to Start"),
+        0 => t!("Уже в Пуске", "Already in Start").to_string(),
+        1 => tf!("Добавлено в Пуск: {}", "Added to Start: {}", added[0]),
+        n => tf!("Добавлено в Пуск: {}", "Added {} items to Start", n),
     });
     KillTimer(hw, 6);
     InvalidateRect(hw, null(), 0);
@@ -283,48 +312,13 @@ pub fn start_toggle(path: &str) {
     let _ = std::fs::write(pin_file(), p.join("\n"));
 }
 
-static EXE_GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// Programs that have no Start menu shortcut (a loose loliland.exe): asks rust-search for .exe files matching what is typed
-/// and adds them to the app list, where the normal ranking picks them up. Debounced; the panel repaints when they arrive.
-fn find_loose_exes(hw: HWND) {
-    let q = QUERY.with_borrow(|q| q.trim().to_string());
-    let gen_ = EXE_GEN.fetch_add(1, Relaxed) + 1;
-    let rs = PathBuf::from(std::env::var_os("ProgramFiles").unwrap_or_default()).join(r"rs-search\rs.exe");
-    if q.chars().count() < 2 || !rs.is_file() {
-        return;
-    }
-    let hw = hw as isize;
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        if EXE_GEN.load(Relaxed) != gen_ {
-            return; // typed on: a newer search is coming
-        }
-        let Ok(o) = Command::new(&rs).arg(&q).creation_flags(NO_WINDOW).output() else { return };
-        let mut apps = APPS.lock().unwrap();
-        let mut added = false;
-        for line in String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.to_lowercase().ends_with(".exe")).take(12) {
-            let w = wide(line);
-            if apps.iter().any(|a| a.1 == w) {
-                continue;
-            }
-            let name = std::path::Path::new(line).file_stem().unwrap_or_default().to_string_lossy().to_string();
-            apps.push((name, w));
-            added = true;
-        }
-        drop(apps);
-        if added {
-            unsafe { InvalidateRect(hw as HWND, null(), 0) };
-        }
-    });
-}
-
 fn filtered() -> Vec<usize> {
     let q = QUERY.with_borrow(|q| q.to_lowercase());
     let mut apps = APPS.lock().unwrap();
     if q.is_empty() {
-        // nothing typed: only what the user pinned (an app that is not a Start menu shortcut joins the list on demand)
-        return PINNED
+        // nothing typed: what the user pinned, then the Start menu's own folders (a click expands one and
+        // shows the shortcuts inside it), then the shortcuts that sit at the top level of the Start menu
+        let mut out: Vec<usize> = PINNED
             .lock()
             .unwrap()
             .iter()
@@ -338,6 +332,29 @@ fn filtered() -> Vec<usize> {
                 })
             })
             .collect();
+        let expf = EXPF.lock().unwrap();
+        for (i, (_, path)) in apps.iter().enumerate() {
+            let p = wstr(path);
+            if let Some(dir) = p.strip_prefix("dir:") {
+                out.push(i);
+                if expf.iter().any(|x| x.eq_ignore_ascii_case(dir)) {
+                    for (ci, c) in apps.iter().enumerate() {
+                        let cp = wstr(&c.1).to_lowercase();
+                        if !cp.starts_with("dir:") && cp.starts_with(&dir.to_lowercase()) {
+                            out.push(ci);
+                        }
+                    }
+                }
+            }
+        }
+        drop(expf);
+        for rp in ROOTS.lock().unwrap().iter() {
+            let w = wide(rp);
+            if let Some(i) = apps.iter().position(|a| a.1 == w) {
+                out.push(i);
+            }
+        }
+        return out;
     }
     // typed in the wrong layout: those matches come after the direct ones
     let fq = flip_layout(&q);
@@ -469,10 +486,23 @@ unsafe fn wifi_join(n: &Net, pass: &str) {
     let ok = with_wlan(|h, g| WlanSetProfile(h, g, 0, x.as_ptr(), null(), 1, null_mut(), &mut reason) == 0).unwrap_or(false);
     if ok {
         wifi_connect(&n.ssid);
-        NOTE.set(format!("Connecting to {}…", n.ssid));
+        NOTE.set(tf!("Подключение к {}…", "Connecting to {}…", n.ssid));
     } else {
-        NOTE.set("Could not save the network (wrong password format?)".into());
+        NOTE.set(t!("Не удалось сохранить сеть (не тот формат пароля?)", "Could not save the network (wrong password format?)").into());
     }
+}
+
+/// The right column of the XP-style Start panel: system places (glyph, name, target to open).
+fn places() -> Vec<(&'static str, &'static str, String)> {
+    let up = std::env::var("USERPROFILE").unwrap_or_default();
+    vec![
+        ("\u{E7F4}", t!("Этот компьютер", "This PC"), "shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}".into()),
+        ("\u{E8A5}", t!("Документы", "Documents"), PathBuf::from(&up).join("Documents").to_string_lossy().to_string()),
+        ("\u{E91B}", t!("Изображения", "Pictures"), PathBuf::from(&up).join("Pictures").to_string_lossy().to_string()),
+        ("\u{E896}", t!("Загрузки", "Downloads"), PathBuf::from(&up).join("Downloads").to_string_lossy().to_string()),
+        ("\u{E839}", t!("Сеть", "Network"), "shell:::{F02C1A0D-BD21-4E75-B4C5-7B07D3F3FC55}".into()),
+        ("\u{E713}", t!("Параметры", "Settings"), "ms-settings:".into()),
+    ]
 }
 
 // ---------- geometry ----------
@@ -482,7 +512,7 @@ fn size(k: Kind) -> (i32, i32) {
         Kind::Quick => (360, 196 + if BRIGHT.load(Relaxed) >= 0 { 96 } else { 48 } + 64),
         Kind::Cal => (330, 340),
         Kind::Wifi => (360, wifi_rows().2),
-        Kind::Start => (560, 640),
+        Kind::Start => (760, 620),
         Kind::Menu => (MW, menu_rows().1),
     }
 }
@@ -548,7 +578,23 @@ fn rects(k: Kind) -> Vec<(RECT, Act)> {
         Kind::Start => {
             let f = filtered();
             let s = SCROLL.get();
-            let mut v: Vec<_> = (0..ROWS).filter(|i| s + i < f.len()).map(|i| (r(12, 76 + 40 * i as i32, w - 12, 76 + 40 * (i as i32 + 1)), Act::App(s + i))).collect();
+            let apps = APPS.lock().unwrap();
+            let expf = EXPF.lock().unwrap();
+            let split = w - 250; // the XP-style right column of system places
+            let mut v: Vec<(RECT, Act)> = Vec::new();
+            for row in 0..ROWS {
+                let idx = s + row;
+                if idx >= f.len() {
+                    break;
+                }
+                // shortcuts inside an expanded folder are indented one step
+                let p = wstr(&apps[f[idx]].1);
+                let x0 = if !p.starts_with("dir:") && expf.iter().any(|d| p.to_lowercase().starts_with(&d.to_lowercase())) { 34 } else { 12 };
+                v.push((r(x0, 76 + 40 * row as i32, split - 8, 76 + 40 * (row as i32 + 1)), Act::App(idx)));
+            }
+            for (i, _) in places().iter().enumerate() {
+                v.push((r(split + 4, 80 + 44 * i as i32, w - 16, 80 + 44 * (i as i32 + 1) - 6), Act::Place(i)));
+            }
             v.extend((0..4u8).map(|i| (r(w - 16 - 4 * 44 + 44 * i as i32, h - 52, w - 16 - 4 * 44 + 44 * (i as i32 + 1) - 4, h - 12), Act::Power(i))));
             v
         }
@@ -613,9 +659,10 @@ const MW: i32 = 272; // menu width
 const MROW: i32 = 38;
 const MHEAD_H: i32 = 58;
 
-/// Menu flyout above the bar, centered on screen x `cx`. `pick` gets the index of the chosen item (not called on cancel).
+/// Menu flyout next to the bar, anchored at the screen point (cx, cy): centered on cx above the bar (horizontal),
+/// or beside the bar by the element's height (vertical). `pick` gets the index of the chosen item (not called on cancel).
 /// A right click while a menu is open replaces it.
-pub fn menu(cx: i32, head: Option<(HICON, &'static str, String, String)>, items: Vec<MItem>, pick: impl FnOnce(usize) + 'static) {
+pub fn menu(cx: i32, cy: i32, head: Option<(HICON, &'static str, String, String)>, items: Vec<MItem>, pick: impl FnOnce(usize) + 'static) {
     if is_open(Kind::Menu) {
         close_now();
     }
@@ -624,6 +671,7 @@ pub fn menu(cx: i32, head: Option<(HICON, &'static str, String, String)>, items:
     MHEAD.set(head);
     MPICK.set(Some(Box::new(pick)));
     MENU_X.set(cx - sc(MW) / 2);
+    MENU_Y.set(cy);
     toggle(Kind::Menu);
 }
 
@@ -642,35 +690,6 @@ fn menu_rows() -> (Vec<(i32, i32)>, i32) {
             .collect()
     });
     (rows, y + 6)
-}
-
-/// Right-click menu of an empty spot of the bar.
-pub fn context_menu(x: i32) {
-    let pu = crate::purge_installed();
-    let mut items = vec![
-        MItem::new(t!("Параметры Windows", "Windows Settings")).hint("Win+I"),
-        MItem::new(t!("Персонализация", "Personalization")),
-        MItem::new(t!("Диспетчер задач", "Task Manager")).hint("Ctrl+Shift+Esc").sep(),
-        MItem::new(t!("Чистильщик диска", "Disk Cleaner")),
-        MItem::new(t!("Программы WinRust на English", "WinRust apps in Русский")), // shared with the other WinRust programs
-        MItem::new(t!("Закрыть панель", "Close the bar")).danger().sep(),
-    ];
-    if pu {
-        items.insert(4, MItem::new(t!("Удалить мусор Windows (необратимо)", "Remove Windows junk (irreversible)")).danger());
-    }
-    menu(x, None, items, move |i| unsafe {
-        let i = if pu && i > 4 { i - 1 } else if pu && i == 4 { 99 } else { i };
-        match i {
-            0 => open(&wide("ms-settings:")),
-            1 => open(&wide("ms-settings:personalization")),
-            // with rtaskmgr-win32 installed this is our task manager; a full path because explorer.exe does not search PATH
-            2 => open(&wide(&format!(r"{}\System32\taskmgr.exe", std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())))),
-            3 => open_cleaner(),
-            99 => crate::open_purge(),
-            4 => crate::i18n::set_english(!crate::i18n::english()),
-            _ => _ = PostMessageW(FindWindowW(wide("topbar").as_ptr(), null()), WM_CLOSE, 0, 0), // quits the bar, brings the Windows taskbar back
-        }
-    });
 }
 
 /// Starts the fade-out of the open flyout (it stays as a ghost window until the fade ends).
@@ -705,15 +724,16 @@ unsafe fn kill_ghost() {
     }
 }
 
-/// One frame of a flyout fade: opening rises up from the bar while fading in, closing fades out while sinking back down.
+/// One frame of a flyout fade: opening rises out of the bar while fading in, closing fades out while sinking back down.
 unsafe fn anim_step(hw: HWND) {
     let now = now_ms();
+    let (sdx, sdy) = fly_slide();
     let (g, gt0, gpos) = GHOST.get();
     if hw == g {
         let t = (now.saturating_sub(gt0) as f32 / 150.0).min(1.0);
         let q = t * t;
         SetLayeredWindowAttributes(hw, 0, ((1.0 - q) * 255.0) as u8, LWA_ALPHA);
-        SetWindowPos(hw, null_mut(), gpos.0, gpos.1 + (q * sc(10) as f32) as i32, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(hw, null_mut(), gpos.0 + sdx, gpos.1 + sdy + (q * sc(10) as f32) as i32, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         if t >= 1.0 {
             kill_ghost();
         }
@@ -722,7 +742,7 @@ unsafe fn anim_step(hw: HWND) {
         let p = 1.0 - (1.0 - t).powi(3);
         SetLayeredWindowAttributes(hw, 0, (p * 255.0) as u8, LWA_ALPHA);
         let (x, y) = FIN.get();
-        SetWindowPos(hw, null_mut(), x, y + ((1.0 - p) * sc(14) as f32) as i32, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(hw, null_mut(), x + sdx, y + sdy + ((1.0 - p) * sc(14) as f32) as i32, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         if t >= 1.0 {
             KillTimer(hw, 3);
         }
@@ -770,13 +790,15 @@ pub fn toggle(k: Kind) {
         let (w, h) = (sc(size(k).0), sc(size(k).1));
         let sw = GetSystemMetrics(SM_CXSCREEN);
         let x = match k {
-            Kind::Start => (sw - w) / 2,
+            Kind::Start => sc(8), // hugs the bar's left end, by the Start button (was: centered)
             Kind::Menu => MENU_X.get().min(sw - w - sc(8)).max(sc(8)),
             _ => sw - w - sc(8),
         };
         let class = wide("topbar_fly");
-        let fy = pop_y(h); // above the bar (below it at the top of the screen)
-        let hw = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, class.as_ptr(), null(), WS_POPUP, x, fy + sc(14), w, h, null_mut(), null_mut(), GetModuleHandleW(null()), null());
+        let anchor = if k == Kind::Menu { Some(MENU_Y.get()) } else { None };
+        let (fx, fy) = pop_fly(x, w, h, anchor); // above the bar (below it at the top of the screen); beside a vertical bar
+        let iy = if vertical() { fy } else { fy + sc(14) }; // it slides in
+        let hw = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, class.as_ptr(), null(), WS_POPUP, fx, iy, w, h, null_mut(), null_mut(), GetModuleHandleW(null()), null());
         SetLayeredWindowAttributes(hw, 0, 0, LWA_ALPHA); // starts invisible, anim_step fades it in
         if k == Kind::Start {
             // accept file drops (an app dragged onto the panel is added to Start); the bar may be elevated, so lift UIPI for them
@@ -785,7 +807,7 @@ pub fn toggle(k: Kind) {
                 ChangeWindowMessageFilterEx(hw, m, MSGFLT_ALLOW, null_mut());
             }
         }
-        FIN.set((x, fy));
+        FIN.set((fx, fy));
         T0.set(now_ms());
         SetWindowRgn(hw, CreateRoundRectRgn(0, 0, w + 1, h + 1, rr(16), rr(16)), 1);
         FH.set(hw);
@@ -816,10 +838,27 @@ unsafe fn wifi_radio(on: bool) {
     });
 }
 
-/// Starts the i-th app of the filtered Start list and counts the launch (search ranks by it). false = no such row.
+/// Starts the i-th app of the filtered Start list and counts the launch (search ranks by it). false = no such row,
+/// or the row was a folder: those expand / collapse in place instead.
 unsafe fn launch(i: usize) -> bool {
     let Some(app) = filtered().get(i).and_then(|&ai| APPS.lock().unwrap().get(ai).cloned()) else { return false };
-    if wstr(&app.1).starts_with("shell:") {
+    let p = wstr(&app.1);
+    if let Some(dir) = p.strip_prefix("dir:") {
+        let mut e = EXPF.lock().unwrap();
+        match e.iter().position(|x| x.eq_ignore_ascii_case(dir)) {
+            Some(k) => {
+                e.remove(k);
+            }
+            None => e.push(dir.to_string()),
+        }
+        drop(e);
+        let fh = FH.get();
+        if !fh.is_null() {
+            InvalidateRect(fh, null(), 0);
+        }
+        return false; // the panel stays open
+    }
+    if p.starts_with("shell:") {
         bump_name(&app.0); // open() counts only .lnk files
     }
     open(&app.1);
@@ -832,7 +871,7 @@ unsafe fn app_menu(hw: HWND, i: usize, x: i32, y: i32) {
     let m = CreatePopupMenu();
     let path = wstr(&lnk);
     let file = !path.starts_with("shell:"); // Store apps have no file to run elevated or to show in a folder
-    for (id, label) in [(1, "Open"), (2, "Run as administrator"), (3, "Open file location"), (4, if start_pinned(&path) { "Remove from Start" } else { "Add to Start" })] {
+    for (id, label) in [(1, t!("Открыть", "Open")), (2, t!("Запуск от имени администратора", "Run as administrator")), (3, t!("Открыть расположение файла", "Open file location")), (4, if start_pinned(&path) { t!("Убрать из Пуска", "Remove from Start") } else { t!("Добавить в Пуск", "Add to Start") })] {
         if file || id == 1 || id == 4 {
             AppendMenuW(m, MF_STRING, id, wide(label).as_ptr());
         }
@@ -908,7 +947,7 @@ unsafe fn run_act(a: Act, rect: RECT, x: i32) {
                 // the card is information; its Disconnect button is the action
             } else if let Some(p) = profile {
                 wifi_connect(&p);
-                NOTE.set(tf!("Подключение к {ssid}…", "Connecting to {ssid}…"));
+                NOTE.set(tf!("Подключение к {}…", "Connecting to {}…", ssid));
             } else if !secure {
                 NETS.with_borrow(|l| wifi_join(&l[i], ""));
             } else if matches!(auth, 4 | 7 | 8 | 9) {
@@ -924,6 +963,13 @@ unsafe fn run_act(a: Act, rect: RECT, x: i32) {
         }
         Act::App(i) => {
             if launch(i) {
+                close();
+            }
+        }
+        Act::Place(i) => {
+            let pl = places();
+            if let Some((_, _, target)) = pl.get(i) {
+                open(&wide(target));
                 close();
             }
         }
@@ -1010,7 +1056,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
         Kind::Quick => {
             let rs = rects(k);
             let ssid = NETS.with_borrow(|n| n.iter().find(|n| n.connected).map(|n| n.ssid.clone()));
-            let tiles = [("\u{E701}", ssid.unwrap_or("Wi‑Fi".into())), ("\u{E702}", "Bluetooth".into()), ("\u{E709}", "Airplane mode".into()), ("\u{E776}", "Accessibility".into()), ("\u{E945}", "Energy saver".into()), ("\u{E7F0}", "Live captions".into())];
+            let tiles = [("\u{E701}", ssid.unwrap_or("Wi‑Fi".into())), ("\u{E702}", t!("Bluetooth", "Bluetooth").into()), ("\u{E709}", t!("Режим „в самолёте“", "Airplane mode").into()), ("\u{E776}", t!("Специальные возможности", "Accessibility").into()), ("\u{E945}", t!("Экономия энергии", "Energy saver").into()), ("\u{E7F0}", t!("Live captions", "Live captions").into())];
             for (i, (glyph, label)) in tiles.iter().enumerate() {
                 let c = (i % 3) as i32;
                 let (tl, tt) = (16 + 112 * c, 16 + 96 * (i as i32 / 3));
@@ -1127,7 +1173,7 @@ unsafe fn paint(hw: HWND, k: Kind) {
             if let Some((i, p)) = pass {
                 let name = NETS.with_borrow(|n| n.get(i).map(|n| n.ssid.clone()).unwrap_or_default());
                 SelectObject(dc, f_txt);
-                text(dc, &tf!("Пароль для «{name}»", "Password for “{name}”"), r(18, 82, w - 18, 106), pal().text, DT_LEFT);
+                text(dc, &tf!("Пароль для «{}»", "Password for “{}”", name), r(18, 82, w - 18, 106), pal().text, DT_LEFT);
                 fill(dc, r(16, 112, w - 16, 150), pal().accent, sc(8));
                 fill(dc, r(17, 113, w - 17, 149), mix(pal().bg, 0, 0.35), sc(8));
                 let dots = "•".repeat(p.chars().count());
@@ -1275,18 +1321,31 @@ unsafe fn paint(hw: HWND, k: Kind) {
             SelectObject(dc, f_txt);
             let q = QUERY.with_borrow(|q| q.clone());
             if q.is_empty() {
-                text(dc, "Type to search apps", r(64, 20, w - 28, 56), pal().dim, DT_LEFT);
+                text(dc, t!("Введите имя приложения", "Type to search apps"), r(64, 20, w - 28, 56), pal().dim, DT_LEFT);
             } else {
                 text(dc, &q, r(64, 20, w - 28, 56), pal().text, DT_LEFT);
             }
+            // the XP-style right column: system places over a hairline separator
+            let split = w - 250;
+            fill(dc, r(split, 68, split + 1, h - 56), pal().line, 0);
+            SelectObject(dc, f_glyph);
+            for (i, (glyph, name, _)) in places().iter().enumerate() {
+                let rc = r(split + 4, 80 + 44 * i as i32, w - 16, 80 + 44 * (i as i32 + 1) - 6);
+                g(Act::Place(i), rc, pal().bg, pal().hover, sc(8));
+                text(dc, glyph, RECT { left: rc.left + sc(8), top: rc.top, right: rc.left + sc(44), bottom: rc.bottom }, pal().accent, DT_CENTER);
+                SelectObject(dc, f_txt);
+                text(dc, name, RECT { left: rc.left + sc(52), top: rc.top, right: rc.right - sc(10), bottom: rc.bottom }, pal().text, DT_LEFT);
+                SelectObject(dc, f_glyph);
+            }
+            SelectObject(dc, f_txt);
             let f = filtered();
             if f.is_empty() {
                 if q.is_empty() {
-                    text(dc, "Nothing here yet", r(24, 76, w - 24, 106), pal().text, DT_LEFT);
-                    text(dc, "Drag an app or file onto the Start button to add it", r(24, 106, w - 24, 134), pal().dim, DT_LEFT);
-                    text(dc, "Or search an app and right-click it → Add to Start", r(24, 134, w - 24, 162), pal().dim, DT_LEFT);
+                    text(dc, t!("Здесь пока ничего нет", "Nothing here yet"), r(24, 76, w - 24, 106), pal().text, DT_LEFT);
+                    text(dc, t!("Перетащите приложение или файл на кнопку Пуска", "Drag an app or file onto the Start button to add it"), r(24, 106, w - 24, 134), pal().dim, DT_LEFT);
+                    text(dc, t!("Или найдите приложение и щёлкните его правой кнопкой → Добавить в Пуск", "Or search an app and right-click it → Add to Start"), r(24, 134, w - 24, 162), pal().dim, DT_LEFT);
                 } else {
-                    text(dc, "No apps found", r(24, 76, w - 24, 116), pal().dim, DT_LEFT);
+                    text(dc, t!("Приложения не найдены", "No apps found"), r(24, 76, w - 24, 116), pal().dim, DT_LEFT);
                 }
             }
             let rs = rects(k);
@@ -1296,6 +1355,24 @@ unsafe fn paint(hw: HWND, k: Kind) {
                     Act::App(i) => {
                         // the list is reloaded on a background thread: an index from a moment ago may be gone
                         let Some(app) = f.get(i).and_then(|&ai| apps.get(ai)) else { continue };
+                        let pth = wstr(&app.1);
+                        if let Some(dir) = pth.strip_prefix("dir:") {
+                            // a folder row: a folder glyph instead of an icon; clicking it expands / collapses it
+                            let open_f = EXPF.lock().unwrap().iter().any(|d| d.eq_ignore_ascii_case(dir));
+                            let sel = i == SEL.get();
+                            if sel {
+                                fill(dc, *rc, mix(pal().bg, pal().accent, 0.14), sc(8));
+                            }
+                            g(*a, *rc, pal().bg, pal().hover, sc(8));
+                            SelectObject(dc, f_glyph);
+                            text(dc, if open_f { "\u{E838}" } else { "\u{E8B7}" }, RECT { left: rc.left + sc(12), top: rc.top, right: rc.left + sc(44), bottom: rc.bottom }, pal().accent, DT_CENTER);
+                            SelectObject(dc, f_txt);
+                            text(dc, &app.0, RECT { left: rc.left + sc(52), top: rc.top, right: rc.right - sc(110), bottom: rc.bottom }, pal().text, DT_LEFT);
+                            SelectObject(dc, f_small);
+                            text(dc, t!("Папка", "Folder"), RECT { left: rc.right - sc(110), top: rc.top, right: rc.right - sc(14), bottom: rc.bottom }, pal().dim, DT_RIGHT);
+                            SelectObject(dc, f_txt);
+                            continue;
+                        }
                         // the row that was just pinned pulses in the accent colour for a moment
                         let pulse = JUST.with_borrow(|j| {
                             let age = now_ms().saturating_sub(j.1) as f32 / 1200.0;
@@ -1338,8 +1415,8 @@ unsafe fn paint(hw: HWND, k: Kind) {
             SelectObject(dc, f_small);
             let note = NOTE.with_borrow(|n| n.clone());
             let hint = match CONFIRM.get() {
-                2 => "Click again to restart".to_string(),
-                3 => "Click again to shut down".to_string(),
+                2 => t!("Нажмите ещё раз для перезагрузки", "Click again to restart").to_string(),
+                3 => t!("Нажмите ещё раз для выключения", "Click again to shut down").to_string(),
                 _ if !note.is_empty() => note,
                 _ => std::env::var("USERNAME").unwrap_or_default(),
             };
@@ -1405,7 +1482,7 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 let (w, h) = (sc(size(k).0), sc(size(k).1));
                 // the panel hangs above the bar: keep its bottom edge where it is and grow / shrink upward
                 let (x, _) = FIN.get();
-                let y = pop_y(h);
+                let y = if vertical() { (GetSystemMetrics(SM_CYSCREEN) - h - sc(8)).max(sc(8)) } else { pop_y(h) };
                 FIN.set((x, y));
                 SetWindowPos(hw, null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
                 SetWindowRgn(hw, CreateRoundRectRgn(0, 0, w + 1, h + 1, rr(16), rr(16)), 1);
@@ -1508,7 +1585,6 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                     });
                     SCROLL.set(0);
                     SEL.set(0);
-                    find_loose_exes(hw);
                 }
             }
             InvalidateRect(hw, null(), 0);
