@@ -361,8 +361,23 @@ fn load_cfg() -> serde_json::Value {
     std::fs::read(cfg_file()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| serde_json::json!({}))
 }
 
+/// Local time as "2026-11-22 10:47:30" — the config's "updated" stamp.
+fn now_stamp() -> String {
+    unsafe {
+        let mut t: SYSTEMTIME = zeroed();
+        GetLocalTime(&mut t);
+        format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
+    }
+}
+
+/// Every config write goes through here: version and last-updated are stamped automatically.
 fn save_cfg(v: &serde_json::Value) {
-    if let Ok(s) = serde_json::to_string_pretty(v) {
+    let mut out = v.clone();
+    if let Some(o) = out.as_object_mut() {
+        o.insert("version".into(), serde_json::json!(env!("CARGO_PKG_VERSION")));
+        o.insert("updated".into(), serde_json::json!(now_stamp()));
+    }
+    if let Ok(s) = serde_json::to_string_pretty(&out) {
         let _ = std::fs::write(cfg_file(), s);
     }
 }
@@ -422,9 +437,7 @@ fn migrate_cfg() {
         .filter_map(|(k, n)| n.trim().parse::<u32>().ok().map(|c| (k.to_string(), serde_json::Value::from(c))))
         .collect();
     let cfg = serde_json::json!({ "theme": theme, "dock": dock, "pins": order, "start": start, "usage": usage });
-    if let Ok(s) = serde_json::to_string_pretty(&cfg) {
-        let _ = std::fs::write(&p, s);
-    }
+    save_cfg(&cfg);
     // one file, one source of truth: the old files are gone
     for f in ["theme.txt", "topbar-pos.txt", "topbar-order.txt", "topbar-start.txt", "topbar-usage.txt"] {
         let _ = std::fs::remove_file(appdata_file(f));
@@ -2926,11 +2939,13 @@ unsafe fn bar_menu(x: i32, y: i32) {
             }
             6 => {
                 set_theme(Theme::Dark);
+                save_cfg(&load_cfg()); // restamp version/updated after common's write
                 InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0);
                 bar_menu(x, y); // re-open: the dot shows the new theme at once
             }
             7 => {
                 set_theme(Theme::Light);
+                save_cfg(&load_cfg()); // restamp version/updated after common's write
                 InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0);
                 bar_menu(x, y);
             }
@@ -3329,6 +3344,11 @@ fn main() {
         SCALE.set(GetDeviceCaps(dc, LOGPIXELSX as i32) as f32 / 96.0);
         ReleaseDC(null_mut(), dc);
         migrate_cfg();
+        // stamp the config with the current build's version if it was written by an older one
+        if cfg_str("version").as_deref() != Some(env!("CARGO_PKG_VERSION")) {
+            let v = load_cfg();
+            save_cfg(&v);
+        }
         load_pos();
         load_pins();
         fly::init(GetModuleHandleW(null()));
