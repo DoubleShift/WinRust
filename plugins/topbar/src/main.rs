@@ -215,12 +215,12 @@ fn pos_name(p: Pos) -> &'static str {
     }
 }
 fn load_pos() {
-    let s = std::fs::read_to_string(appdata_file("topbar-pos.txt")).unwrap_or_default();
+    let s = cfg_str("dock").unwrap_or_default();
     POS.store(POS_ALL.iter().position(|p| pos_name(*p) == s.trim().to_lowercase()).unwrap_or(0), Relaxed);
 }
 fn set_pos(p: Pos) {
     POS.store(POS_ALL.iter().position(|&x| x == p).unwrap_or(0), Relaxed);
-    let _ = std::fs::write(appdata_file("topbar-pos.txt"), pos_name(p));
+    cfg_set("dock", serde_json::json!(pos_name(p)));
     let bar = BAR.load(Relaxed) as HWND;
     if !bar.is_null() {
         unsafe {
@@ -348,15 +348,95 @@ struct Cds {
 }
 static USAGE: Mutex<Option<HashMap<String, u32>>> = Mutex::new(None); // launches per shortcut name, lower-case
 
-/// All of topbar's own config files sit next to the exe (portable: pos, tray, usage, Start pins, drag order).
+/// All of topbar's config lives in ONE taskbar.json next to the exe (portable): theme, dock, icon order,
+/// Start pins and the usage counters. The pre-JSON topbar-*.txt / theme.txt files are imported once.
 fn appdata_file(name: &str) -> PathBuf {
     std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join(name))).unwrap_or_else(|| PathBuf::from(name))
 }
+
+fn cfg_file() -> PathBuf {
+    appdata_file("taskbar.json")
+}
+fn load_cfg() -> serde_json::Value {
+    std::fs::read(cfg_file()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn save_cfg(v: &serde_json::Value) {
+    if let Ok(s) = serde_json::to_string_pretty(v) {
+        let _ = std::fs::write(cfg_file(), s);
+    }
+}
+
+fn cfg_set(key: &str, val: serde_json::Value) {
+    let mut v = load_cfg();
+    if let Some(o) = v.as_object_mut() {
+        o.insert(key.to_string(), val);
+    }
+    save_cfg(&v);
+}
+
+fn cfg_str(key: &str) -> Option<String> {
+    load_cfg().get(key)?.as_str().map(str::to_string)
+}
+
+fn cfg_arr(key: &str) -> Vec<String> {
+    load_cfg().get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
+fn cfg_map_u32(key: &str) -> HashMap<String, u32> {
+    load_cfg().get(key).and_then(|v| v.as_object()).map(|o| o.iter().filter_map(|(k, x)| x.as_u64().map(|n| (k.clone(), n as u32))).collect()).unwrap_or_default()
+}
+/// The Start-panel pinned items (fly.rs reads them; they live in taskbar.json like everything else).
+pub(crate) fn cfg_start() -> Vec<String> {
+    cfg_arr("start")
+}
+pub(crate) fn cfg_set_start(v: Vec<String>) {
+    cfg_set("start", v.into());
+}
+
+/// One-time import of the pre-JSON config files into taskbar.json (skipped when the json already exists).
+fn migrate_cfg() {
+    let p = appdata_file("taskbar.json");
+    if p.exists() {
+        return;
+    }
+    let read = |f: &str| std::fs::read_to_string(appdata_file(f)).unwrap_or_default();
+    let mut theme = read("theme.txt");
+    if theme.trim().is_empty() {
+        theme = std::env::var_os("ProgramData")
+            .map(|d| std::fs::read_to_string(PathBuf::from(d).join(r"WinRust\theme.txt")).unwrap_or_default())
+            .unwrap_or_default();
+    }
+    let theme = if theme.trim().eq_ignore_ascii_case("dark") { "dark" } else { "light" };
+    let dock = match read("topbar-pos.txt").trim().to_lowercase().as_str() {
+        "top" => "top",
+        "left" => "left",
+        "right" => "right",
+        _ => "bottom",
+    };
+    let order: Vec<String> = read("topbar-order.txt").lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
+    let start: Vec<String> = read("topbar-start.txt").lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
+    let usage: serde_json::Map<String, serde_json::Value> = read("topbar-usage.txt")
+        .lines()
+        .filter_map(|l| l.rsplit_once('\t'))
+        .filter_map(|(k, n)| n.trim().parse::<u32>().ok().map(|c| (k.to_string(), serde_json::Value::from(c))))
+        .collect();
+    let cfg = serde_json::json!({ "theme": theme, "dock": dock, "order": order, "start": start, "usage": usage });
+    if let Ok(s) = serde_json::to_string_pretty(&cfg) {
+        let _ = std::fs::write(&p, s);
+    }
+    // one file, one source of truth: the old files are gone
+    for f in ["theme.txt", "topbar-pos.txt", "topbar-order.txt", "topbar-start.txt", "topbar-usage.txt"] {
+        let _ = std::fs::remove_file(appdata_file(f));
+    }
+    let _ = std::env::var_os("ProgramData").map(|d| std::fs::remove_file(PathBuf::from(d).join(r"WinRust\theme.txt")));
+}
+
 fn uses(name: &str) -> u32 {
     USAGE
         .lock()
         .unwrap()
-        .get_or_insert_with(|| std::fs::read_to_string(appdata_file("topbar-usage.txt")).unwrap_or_default().lines().filter_map(|l| l.rsplit_once('\t')).filter_map(|(k, n)| Some((k.to_string(), n.parse().ok()?))).collect())
+        .get_or_insert_with(|| cfg_map_u32("usage"))
         .get(name)
         .copied()
         .unwrap_or(0)
@@ -368,11 +448,15 @@ fn bump(path: &str) {
 /// Counts one launch of the app called `name` (Start search ranks by it).
 fn bump_name(name: &str) {
     let name = name.to_lowercase();
-    uses(&name); // loads the file first
-    let mut g = USAGE.lock().unwrap();
-    let m = g.as_mut().unwrap();
-    *m.entry(name).or_insert(0) += 1;
-    let _ = std::fs::write(appdata_file("topbar-usage.txt"), m.iter().map(|(k, n)| format!("{k}\t{n}\n")).collect::<String>());
+    uses(&name); // loads the config first
+    let v = {
+        let mut g = USAGE.lock().unwrap();
+        let m = g.as_mut().unwrap();
+        *m.entry(name).or_insert(0) += 1;
+        let v: serde_json::Map<String, serde_json::Value> = m.iter().map(|(k, n)| (k.clone(), serde_json::Value::from(*n))).collect();
+        v
+    };
+    cfg_set("usage", v.into());
 }
 fn lnk_uses(lnk: &std::path::Path) -> u32 {
     uses(&lnk.file_stem().unwrap_or_default().to_string_lossy().to_lowercase())
@@ -387,7 +471,6 @@ thread_local! {
     static PINS: RefCell<Vec<Pin>> = const { RefCell::new(Vec::new()) };
     static BTNS: RefCell<Vec<Btn>> = const { RefCell::new(Vec::new()) }; // [0] is always Start (pin None, no wins)
     static TAPPS: RefCell<Vec<TIcon>> = const { RefCell::new(Vec::new()) };
-    static SHOWN: RefCell<Option<Vec<String>>> = const { RefCell::new(None) }; // tray icons kept on the bar (by exe); None = none: every tray icon lives in the chevron flyout
     static TRAYFLY: Cell<HWND> = const { Cell::new(null_mut()) };
     static TF_ANIM: Cell<(u64, i32, i32)> = const { Cell::new((0, 0, 0)) }; // tray flyout: when it opened, its final x, y
     static FHOT: Cell<i32> = const { Cell::new(-1) };
@@ -564,16 +647,6 @@ fn over_idx() -> Vec<usize> {
     TAPPS.with_borrow(|t| (0..t.len()).filter(|i| !bar.contains(i)).collect())
 }
 
-fn toggle_shown(key: &str) {
-    let mut cur = SHOWN.with_borrow(|s| s.clone()).unwrap_or_else(|| TAPPS.with_borrow(|t| bar_idx().into_iter().map(|i| t[i].key.clone()).collect()));
-    match cur.iter().position(|k| k == key) {
-        Some(p) => drop(cur.remove(p)),
-        None => cur.push(key.to_string()),
-    }
-    let _ = std::fs::write(appdata_file("topbar-tray.txt"), cur.join("\n"));
-    SHOWN.set(Some(cur));
-}
-
 // ---------- tray overflow flyout (the chevron): every icon, click / right click work as in the real tray ----------
 
 const FCELL: i32 = 38;
@@ -688,15 +761,10 @@ unsafe extern "system" fn fly_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
             let i = cell_at(lp);
             let ti = over_idx().get(i.max(0) as usize).and_then(|&k| TAPPS.with_borrow(|t| t.get(k).map(|x| ((x.hwnd, x.uid, x.cb, x.ver), x.key.clone()))));
-            if let (true, Some((t, key))) = (i >= 0, ti) {
-                if msg == WM_MBUTTONDOWN {
-                    toggle_shown(&key);
-                    InvalidateRect(hwnd, null(), 0);
-                } else {
-                    ShowWindow(hwnd, SW_HIDE);
-                    InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0); // the bar's chevron turns with it
-                    tray_click(t, msg == WM_LBUTTONDOWN);
-                }
+            if let (true, Some((t, _key))) = (i >= 0, ti) {
+                ShowWindow(hwnd, SW_HIDE);
+                InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0); // the bar's chevron turns with it
+                tray_click(t, msg != WM_RBUTTONDOWN); // left and middle both act as a left click on the icon
             }
             0
         }
@@ -2872,13 +2940,9 @@ unsafe fn click(h: i32, left: bool, mid: bool) {
                 if left {
                     fly_toggle();
                 }
-            } else if mid {
-                if let Some(k) = bar_idx().get(slot - chev).and_then(|&i| TAPPS.with_borrow(|t| t.get(i).map(|x| x.key.clone()))) {
-                    toggle_shown(&k); // back into the flyout
-                }
             } else {
                 let ti = bar_idx().get(slot - chev).and_then(|&i| TAPPS.with_borrow(|t| t.get(i).map(|x| (x.hwnd, x.uid, x.cb, x.ver))));
-                ti.into_iter().for_each(|ti| tray_click(ti, left));
+                ti.into_iter().for_each(|ti| tray_click(ti, left || mid));
             }
         }
         0 => {
@@ -3238,7 +3302,7 @@ fn main() {
         let dc = GetDC(null_mut());
         SCALE.set(GetDeviceCaps(dc, LOGPIXELSX as i32) as f32 / 96.0);
         ReleaseDC(null_mut(), dc);
-        SHOWN.set(std::fs::read_to_string(appdata_file("topbar-tray.txt")).ok().map(|s| s.lines().map(str::to_string).collect()));
+        migrate_cfg();
         load_pos();
         load_pins();
         fly::init(GetModuleHandleW(null()));
