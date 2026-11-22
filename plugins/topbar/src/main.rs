@@ -1602,7 +1602,7 @@ fn layout(w: i32) -> Layout {
     let gap = sc(4);
     let desk = (w - sc(40), w - sc(4));
     let clock = (desk.0 - sc(4) - sc(90), desk.0 - sc(4));
-    let sys = (clock.0 - sc(4) - sc(106 + if BAT.get().0 >= 0 { 48 } else { 0 }), clock.0 - sc(4));
+    let sys = (clock.0 - sc(4) - sc(106 + if BAT.get().0 >= 0 { 32 } else { 0 }), clock.0 - sc(4));
     let apps = (sys.0 - sc(24) * tray_count() as i32, sys.0);
     // Start at the very head, the search slot and the rest packed right after it
     let x0 = sc(6);
@@ -1623,7 +1623,7 @@ unsafe fn hit(hwnd: HWND, x: i32) -> i32 {
     }
     if x >= l.sys.0 {
         let d = x - l.sys.0;
-        return if d < sc(42) { LANG } else if d < sc(74) { WIFI_I } else if d < sc(106) { VOL_I } else { BAT_I };
+        return if d < sc(42) { LANG } else if d < sc(74) { WIFI_I } else if d < sc(104) { VOL_I } else { BAT_I };
     }
     if x >= l.apps.0 {
         return TAPP + (x - l.apps.0) / sc(24);
@@ -1743,7 +1743,7 @@ unsafe fn paint_v(hwnd: HWND) {
     SetBkMode(dc, TRANSPARENT as i32);
     let (face, gface) = (wide(ui_face()), wide("Segoe MDL2 Assets"));
     let font = |f: &[u16], px: i32, wt: i32| CreateFontW(-sc(px), 0, 0, 0, wt, 0, 0, 0, 1, 0, 0, 5, 0, f.as_ptr());
-    let (f_txt, f_small, f_glyph, f_bold) = (font(&face, 13, 400), font(&face, 12, 400), font(&gface, 16, 400), font(&face, 13, 600));
+    let (f_txt, f_small, f_glyph, f_bold, f_vol) = (font(&face, 13, 400), font(&face, 12, 400), font(&gface, 16, 400), font(&face, 13, 600), font(&gface, 19, 400));
     let of = SelectObject(dc, f_txt);
     let fg = GetForegroundWindow();
     let hot = HOT.get();
@@ -1790,7 +1790,7 @@ unsafe fn paint_v(hwnd: HWND) {
             WIFI_I => net_icon(dc, cx, mid, sc(17), f_glyph),
             VOL_I => {
                 glow(dc, VOL_I, hot == VOL_I, row, pal().bg, pal().hover, sc(8));
-                SelectObject(dc, f_glyph);
+                SelectObject(dc, f_vol); // bigger than the nominal size, same reason as the horizontal bar
                 let (vol, muted) = VOL.get();
                 let vg = if muted || vol == 0 { "\u{E74F}" } else if vol < 34 { "\u{E993}" } else if vol < 67 { "\u{E994}" } else { "\u{E995}" };
                 text(dc, vg, row, if muted { BAD } else { pal().text }, DT_CENTER);
@@ -1801,7 +1801,7 @@ unsafe fn paint_v(hwnd: HWND) {
                 if pct >= 0 {
                     // the percentage lives inside the battery body, same style as the horizontal bar
                     let col = if ac { GOOD } else if pct <= 15 { BAD } else { pal().text };
-                    let (bw2, bh2) = (sc(36), sc(16));
+                    let (bw2, bh2) = (sc(30), sc(16));
                     let (bx0, by0) = (cx - bw2 / 2, mid - bh2 / 2);
                     fill(dc, RECT { left: bx0, top: by0, right: bx0 + bw2, bottom: by0 + bh2 }, col, sc(4)); // body outline
                     fill(dc, RECT { left: bx0 + sc(2), top: by0 + sc(2), right: bx0 + bw2 - sc(2), bottom: by0 + bh2 - sc(2) }, pal().bg, sc(3));
@@ -1860,7 +1860,7 @@ unsafe fn paint_v(hwnd: HWND) {
     }
     BitBlt(wdc, 0, 0, w, h, dc, 0, 0, SRCCOPY);
     SelectObject(dc, of);
-    for f in [f_txt, f_small, f_glyph, f_bold] {
+    for f in [f_txt, f_small, f_glyph, f_bold, f_vol] {
         DeleteObject(f);
     }
     SelectObject(dc, old);
@@ -2499,7 +2499,7 @@ unsafe fn paint(hwnd: HWND) {
     SetBkMode(dc, TRANSPARENT as i32);
     let (face, gface) = (wide(ui_face()), wide("Segoe MDL2 Assets"));
     let font = |f: &[u16], px: i32, wt: i32| CreateFontW(-sc(px), 0, 0, 0, wt, 0, 0, 0, 1, 0, 0, 5, 0, f.as_ptr());
-    let (f_txt, f_small, f_glyph, f_bold) = (font(&face, 13, 400), font(&face, 12, 400), font(&gface, 16, 400), font(&face, 13, 600));
+    let (f_txt, f_small, f_glyph, f_bold, f_vol) = (font(&face, 13, 400), font(&face, 12, 400), font(&gface, 16, 400), font(&face, 13, 600), font(&gface, 19, 400));
     let of = SelectObject(dc, f_txt);
 
     let l = layout(cr.right);
@@ -2595,25 +2595,25 @@ unsafe fn paint(hwnd: HWND) {
     }
     let mut x = tb.left + sc(10);
     text(dc, &lang_name(), cell(x, sc(34)), pal().text, DT_LEFT);
-    x += sc(42);
-    net_icon(dc, x + sc(8), mid, sc(15), f_glyph);
+    x += sc(34);
+    net_icon(dc, x + sc(15), mid, sc(15), f_glyph);
     x += sc(32);
-    SelectObject(dc, f_glyph);
+    SelectObject(dc, f_vol); // a bigger font: the MDL2 speaker glyphs have more whitespace than the wifi arcs, so at the nominal size they read smaller
     let (vol, muted) = VOL.get();
     let vg = if muted || vol == 0 { "\u{E74F}" } else if vol < 34 { "\u{E993}" } else if vol < 67 { "\u{E994}" } else { "\u{E995}" };
-    text(dc, vg, cell(x, sc(20)), if muted { BAD } else { pal().text }, DT_CENTER);
-    x += sc(32);
+    text(dc, vg, cell(x + sc(5), sc(20)), if muted { BAD } else { pal().text }, DT_CENTER);
+    x += sc(28);
     let (pct, ac) = BAT.get();
     if pct >= 0 {
         // the percentage lives INSIDE the battery body (phone-style); wifi / volume / battery share one size
         let col = if ac { GOOD } else if pct <= 15 { BAD } else { pal().text };
-        let (bw, bh) = (sc(38), sc(18));
+        let (bw, bh) = (sc(30), sc(16));
         let by = mid - bh / 2;
-        fill(dc, RECT { left: x, top: by, right: x + bw, bottom: by + bh }, col, sc(5)); // body outline
+        fill(dc, RECT { left: x, top: by, right: x + bw, bottom: by + bh }, col, sc(4)); // body outline
         fill(dc, RECT { left: x + sc(2), top: by + sc(2), right: x + bw - sc(2), bottom: by + bh - sc(2) }, mix(pal().bg, pal().hover, tg), sc(3));
         SelectObject(dc, f_small);
-        text(dc, &pct.to_string(), RECT { left: x + sc(3), top: by, right: x + bw - sc(4), bottom: by + bh }, col, DT_CENTER); // the number IS the fill
-        fill(dc, RECT { left: x + bw + sc(1), top: by + sc(4), right: x + bw + sc(3), bottom: by + bh - sc(4) }, col, sc(1)); // terminal nub
+        text(dc, &pct.to_string(), RECT { left: x + sc(2), top: by, right: x + bw - sc(2), bottom: by + bh }, col, DT_CENTER); // the number IS the fill
+        fill(dc, RECT { left: x + bw + sc(1), top: by + sc(3), right: x + bw + sc(3), bottom: by + bh - sc(3) }, col, sc(1)); // terminal nub
     }
 
     // show-desktop placeholder at the very end: a mini Win-logo, single click shows the desktop
@@ -2642,7 +2642,7 @@ unsafe fn paint(hwnd: HWND) {
 
     BitBlt(wdc, 0, 0, cr.right, h, dc, 0, 0, SRCCOPY);
     SelectObject(dc, of);
-    for f in [f_txt, f_small, f_glyph, f_bold] {
+    for f in [f_txt, f_small, f_glyph, f_bold, f_vol] {
         DeleteObject(f);
     }
     SelectObject(dc, old);
