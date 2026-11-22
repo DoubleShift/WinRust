@@ -294,7 +294,6 @@ const CALLBACK: u32 = WM_APP + 1;
 const WM_MOUSELEAVE: u32 = 0x02A3; // not exported under the enabled features
 const NO_WINDOW: u32 = 0x0800_0000;
 const BAR_H: i32 = 40;
-const STRIP_W: i32 = 120; // the show-desktop strip's width at the far right edge (a half-logo panel with color blocks)
 // hit-test results. Buttons (Start, pins, windows) are >= 0 in left-to-right order; tray apps are TAPP + index.
 const NONE: i32 = -1;
 const SEARCH: i32 = -10;
@@ -305,6 +304,7 @@ const VOL_I: i32 = -8;
 const BAT_I: i32 = -9;
 const TAPP: i32 = -1000;
 const SYS_GRP: i32 = -11; // hover key of the one pill around wifi + volume + battery (they open the same panel)
+const DESK: i32 = -14; // the show-desktop placeholder at the very end of the bar (mini Win-logo)
 const WIN_START: u32 = WM_APP + 10; // posted by the keyboard hook: Win key pressed alone
 const ALT_TAB: u32 = WM_APP + 11; // posted by the keyboard hook: Alt+Tab (wp 1 = Shift held: backwards)
 const ALT_UP: u32 = WM_APP + 12; // posted by the keyboard hook: Alt released while switching (wp 1 = Esc: cancel)
@@ -382,8 +382,6 @@ thread_local! {
     static HOST: Cell<HWND> = const { Cell::new(null_mut()) };
     static TIPWND: Cell<HWND> = const { Cell::new(null_mut()) };
     static SWWND: Cell<HWND> = const { Cell::new(null_mut()) }; // the Alt+Tab switcher
-    static STRIP: Cell<HWND> = const { Cell::new(null_mut()) }; // the show-desktop sliver at the far right edge
-    static STRIP_TOP: Cell<bool> = const { Cell::new(false) }; // true when the sliver is a top-level window (child creation failed)
     static SW: RefCell<(Vec<HWND>, usize)> = const { RefCell::new((Vec::new(), 0)) }; // its windows (z-order) and selection
     static TIP: RefCell<String> = const { RefCell::new(String::new()) };
     static PINS: RefCell<Vec<Pin>> = const { RefCell::new(Vec::new()) };
@@ -755,6 +753,7 @@ unsafe fn tip_text(h: i32) -> String {
     match h {
         SEARCH => t!("Поиск", "Search").into(),
         0 => t!("Пуск", "Start").into(),
+        DESK => t!("Показать рабочий стол", "Show desktop").into(),
         TAPP => t!("Скрытые значки", "Hidden icons").into(),
         CLOCK => {
             let mut t: SYSTEMTIME = zeroed();
@@ -996,15 +995,6 @@ unsafe fn place(hwnd: HWND) {
     SetWindowRgn(hwnd, if style() == Style::Dock { CreateRoundRectRgn(0, 0, ww + 1, hh + 1, ww.min(hh), ww.min(hh)) } else { null_mut() }, 1);
     let (sx, sy) = bar_xy();
     SetWindowPos(hwnd, HWND_TOPMOST, sx, sy, ww, hh, SWP_NOACTIVATE);
-    // the show-desktop strip: a slim visible sliver at the far right edge of the screen, independent of the bar
-    // (hidden when the bar itself docks right, since the strip would sit under it)
-    if !STRIP.get().is_null() {
-        if pos() == Pos::Right {
-            ShowWindow(STRIP.get(), SW_HIDE);
-        } else {
-            SetWindowPos(STRIP.get(), HWND_TOPMOST, cx - sc(STRIP_W), (cy - sc(220)) / 2, sc(STRIP_W), sc(220), SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        }
-    }
     InvalidateRect(hwnd, null(), 0);
 }
 
@@ -1499,24 +1489,29 @@ struct Layout {
     apps: (i32, i32),
     sys: (i32, i32),
     clock: (i32, i32),
+    desk: (i32, i32), // the show-desktop placeholder at the very end
 }
 
 fn layout(w: i32) -> Layout {
     let gap = sc(4);
-    let clock = (w - sc(96), w - sc(6));
+    let desk = (w - sc(40), w - sc(4));
+    let clock = (desk.0 - sc(4) - sc(90), desk.0 - sc(4));
     let sys = (clock.0 - sc(4) - sc(106 + if BAT.get().0 >= 0 { 74 } else { 0 }), clock.0 - sc(4));
     let apps = (sys.0 - sc(24) * tray_count() as i32, sys.0);
     // Start at the very head, the search slot and the rest packed right after it
     let x0 = sc(6);
     let n = BTNS.with_borrow(|b| b.len()) as i32 + 1; // + the search slot
     let bw = (((apps.0 - x0 - sc(8)) - gap * (n - 1)) / n.max(1)).clamp(sc(16), sc(44));
-    Layout { x0, bw, gap, apps, sys, clock }
+    Layout { x0, bw, gap, apps, sys, clock, desk }
 }
 
 unsafe fn hit(hwnd: HWND, x: i32) -> i32 {
     let mut r: RECT = zeroed();
     GetClientRect(hwnd, &mut r);
     let l = layout(r.right);
+    if x >= l.desk.0 {
+        return DESK;
+    }
     if x >= l.clock.0 {
         return CLOCK;
     }
@@ -1561,6 +1556,8 @@ fn rows_v(h: i32) -> Vec<(i32, i32, i32)> {
     let mut top = h - sc(6);
     rows.push((CLOCK, top - sc(48), sc(48)));
     top -= sc(48) + gap;
+    rows.push((DESK, top - sc(36), sc(36)));
+    top -= sc(36) + gap;
     if BAT.get().0 >= 0 {
         rows.push((BAT_I, top - sc(26), sc(26)));
         top -= sc(26) + gap;
@@ -1712,6 +1709,18 @@ unsafe fn paint_v(hwnd: HWND) {
                 text(dc, &tm, RECT { left: 0, top, right: w, bottom: mid }, pal().text, DT_CENTER);
                 SelectObject(dc, f_small);
                 text(dc, &clock_date_v(), RECT { left: 0, top: mid, right: w, bottom: bot }, mix(pal().dim, pal().text, 0.35), DT_CENTER);
+            }
+            DESK => {
+                glow(dc, DESK, hot == DESK, row, pal().bg, pal().hover, sc(8));
+                let dh = hv(DESK, hot == DESK);
+                let t = (sc(7) as f32 * (1.0 + 0.15 * dh)) as i32;
+                let g2 = sc(1).max(1);
+                let base = mix(pal().dim, pal().text, 0.35 + 0.65 * dh);
+                let tint2 = [mix(base, pal().text, 0.3), base, base, mix(base, pal().bg, 0.2)];
+                for (k, (dx, dy)) in [(-1, -1), (0, -1), (-1, 0), (0, 0)].into_iter().enumerate() {
+                    let (px, py) = (cx + if dx < 0 { -t - g2 } else { g2 }, mid + if dy < 0 { -t - g2 } else { g2 });
+                    fill(dc, RECT { left: px, top: py, right: px + t, bottom: py + t }, tint2[k], sc(2));
+                }
             }
             TAPP => {
                 glow(dc, TAPP, hot == TAPP, row, pal().bg, pal().hover, sc(8));
@@ -1976,11 +1985,6 @@ unsafe fn fs_update(hwnd: HWND) {
         if fs {
             fly::close_now();
             hide_tip(hwnd);
-            if !STRIP.get().is_null() {
-                ShowWindow(STRIP.get(), SW_HIDE); // the strip must not cover a fullscreen app's right edge either
-            }
-        } else if !STRIP.get().is_null() {
-            ShowWindow(STRIP.get(), SW_SHOWNA);
         }
         bar_anim(hwnd);
     }
@@ -2505,6 +2509,21 @@ unsafe fn paint(hwnd: HWND) {
         text(dc, &format!("{pct}%"), cell(x + bw + sc(8), sc(40)), pal().text, DT_LEFT);
     }
 
+    // show-desktop placeholder at the very end: a mini Win-logo, single click shows the desktop
+    let db = RECT { left: l.desk.0, top, right: l.desk.1, bottom: bot };
+    glow(dc, DESK, hot == DESK, db, pal().bg, pal().hover, sc(8));
+    {
+        let dh = hv(DESK, hot == DESK);
+        let t = (sc(4) as f32 * (1.0 + 0.15 * dh)) as i32;
+        let (g2, cx2) = (sc(1).max(1), (db.left + db.right) / 2);
+        let base = mix(pal().dim, pal().text, 0.35 + 0.65 * dh);
+        let tint2 = [mix(base, pal().text, 0.3), base, base, mix(base, pal().bg, 0.2)];
+        for (k, (dx, dy)) in [(-1, -1), (0, -1), (-1, 0), (0, 0)].into_iter().enumerate() {
+            let (px, py) = (cx2 + if dx < 0 { -t - g2 } else { g2 }, mid + if dy < 0 { -t - g2 } else { g2 });
+            fill(dc, RECT { left: px, top: py, right: px + t, bottom: py + t }, tint2[k], sc(2));
+        }
+    }
+
     // time (semibold) over the date (dimmed)
     let cb = cell(l.clock.0, l.clock.1 - l.clock.0);
     glow(dc, CLOCK, hot == CLOCK || fly::is_open(fly::Kind::Cal), cb, pal().bg, pal().hover, sc(8));
@@ -2845,6 +2864,7 @@ unsafe fn click(h: i32, left: bool, mid: bool) {
         WIFI_I => fly::toggle(if left { fly::Kind::Quick } else { fly::Kind::Wifi }), // right click: the network list
         VOL_I | BAT_I => fly::toggle(fly::Kind::Quick),
         CLOCK if left => fly::toggle(fly::Kind::Cal),
+        DESK if left => winrust_common::desktop::toggle(), // single click: show desktop / bring windows back
         TAPP..=-900 => {
             let slot = (h - TAPP) as usize;
             let chev = if over_idx().is_empty() { 0 } else { 1 };
@@ -2956,6 +2976,7 @@ unsafe fn tip_pt(bar: HWND, h: i32) -> (i32, i32) {
         bx + match h {
             SEARCH => l.x0 + 2 * l.bw + l.gap + l.bw / 2,
             0 => l.x0 + l.bw / 2,
+            DESK => (l.desk.0 + l.desk.1) / 2,
             CLOCK => (l.clock.0 + l.clock.1) / 2,
             LANG => l.sys.0 + sc(21),
             WIFI_I => l.sys.0 + sc(58),
@@ -2966,44 +2987,6 @@ unsafe fn tip_pt(bar: HWND, h: i32) -> (i32, i32) {
         },
         mid,
     )
-}
-
-/// The show-desktop strip: a slim visible sliver at the far right edge of the screen. DOUBLE-CLICK toggles the
-/// desktop (the same toggle the Win+D hotkey runs): windows minimize, and a double-click brings them back.
-unsafe extern "system" fn strip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    if msg != 0 && msg == i18n::style::msg() {
-        InvalidateRect(hwnd, null(), 0); // repaint in the new theme
-        return 0;
-    }
-    match msg {
-        WM_LBUTTONDBLCLK => {
-            winrust_common::desktop::toggle();
-            0
-        }
-        WM_PAINT => {
-            let mut ps: PAINTSTRUCT = zeroed();
-            let dc = BeginPaint(hwnd, &mut ps);
-            let mut r: RECT = zeroed();
-            GetClientRect(hwnd, &mut r);
-            fill(dc, r, pal().bg, sc(10));
-            // half-logo size: four blue tiles, lit from the top-left
-            let ts = sc(44);
-            let gap = sc(12);
-            let bw = ts * 2 + gap;
-            let ox = ((r.right - bw) / 2).max(sc(6));
-            let oy = ((r.bottom - (ts * 2 + gap)) / 2).max(sc(6));
-            let cols = [[77u8, 157, 224], [42, 130, 205], [42, 130, 205], [0, 103, 192]];
-            for i in 0..4i32 {
-                let cx = ox + (i % 2) * (ts + gap);
-                let cy = oy + (i / 2) * (ts + gap);
-                let c = cols[i as usize];
-                fill(dc, RECT { left: cx, top: cy, right: cx + ts, bottom: cy + ts }, rgb(c[0], c[1], c[2]), sc(12));
-            }
-            EndPaint(hwnd, &ps);
-            0
-        }
-        _ => DefWindowProcW(hwnd, msg, wp, lp),
-    }
 }
 
 /// Registers the bar as an appbar with explorer (again after explorer restarts: its list starts empty).
@@ -3287,16 +3270,6 @@ fn main() {
         let swc = wide("topbar_alttab");
         RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(sw_proc), hInstance: hi, lpszClassName: swc.as_ptr(), ..zeroed() });
         SWWND.set(CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, swc.as_ptr(), null(), WS_POPUP, 0, 0, 1, 1, null_mut(), null_mut(), hi, null()));
-        // the show-desktop strip: a slim VISIBLE sliver at the far right edge of the screen, spanning its full height.
-        // DOUBLE-CLICK on it shows the desktop (same as Win+D) and a double-click brings the windows back.
-        let stc = wide("topbar_strip");
-        RegisterClassW(&WNDCLASSW { style: CS_DBLCLKS, lpfnWndProc: Some(strip_proc), hInstance: hi, hCursor: LoadCursorW(null_mut(), IDC_ARROW), lpszClassName: stc.as_ptr(), ..zeroed() });
-        let strip = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, stc.as_ptr(), null(), WS_POPUP, 0, (GetSystemMetrics(SM_CYSCREEN) - sc(220)) / 2, sc(STRIP_W), sc(220), null_mut(), null_mut(), hi, null());
-        STRIP.set(strip);
-        STRIP_TOP.set(true); // top-level: independent of the bar, spans the screen height at the far right edge
-        if !strip.is_null() {
-            SetLayeredWindowAttributes(strip, 0, 90, LWA_ALPHA); // subtle but visible and clickable
-        }
         let mut ab: APPBARDATA = zeroed();
         ab.cbSize = size_of::<APPBARDATA>() as u32;
         ab.hWnd = tray()[0];
