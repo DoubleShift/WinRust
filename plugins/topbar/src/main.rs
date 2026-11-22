@@ -1623,7 +1623,7 @@ unsafe fn hit(hwnd: HWND, x: i32) -> i32 {
     }
     if x >= l.sys.0 {
         let d = x - l.sys.0;
-        return if d < sc(42) { LANG } else if d < sc(74) { WIFI_I } else if d < sc(104) { VOL_I } else { BAT_I };
+        return if d < sc(42) { LANG } else if d < sc(74) { WIFI_I } else if d < sc(100) { VOL_I } else { BAT_I };
     }
     if x >= l.apps.0 {
         return TAPP + (x - l.apps.0) / sc(24);
@@ -1743,7 +1743,7 @@ unsafe fn paint_v(hwnd: HWND) {
     SetBkMode(dc, TRANSPARENT as i32);
     let (face, gface) = (wide(ui_face()), wide("Segoe MDL2 Assets"));
     let font = |f: &[u16], px: i32, wt: i32| CreateFontW(-sc(px), 0, 0, 0, wt, 0, 0, 0, 1, 0, 0, 5, 0, f.as_ptr());
-    let (f_txt, f_small, f_glyph, f_bold, f_vol) = (font(&face, 13, 400), font(&face, 12, 400), font(&gface, 16, 400), font(&face, 13, 600), font(&gface, 19, 400));
+    let (f_txt, f_small, f_glyph, f_bold, f_vol) = (font(&face, 13, 400), font(&face, 12, 400), font(&gface, 16, 400), font(&face, 13, 600), font(&gface, 18, 400));
     let of = SelectObject(dc, f_txt);
     let fg = GetForegroundWindow();
     let hot = HOT.get();
@@ -2499,7 +2499,7 @@ unsafe fn paint(hwnd: HWND) {
     SetBkMode(dc, TRANSPARENT as i32);
     let (face, gface) = (wide(ui_face()), wide("Segoe MDL2 Assets"));
     let font = |f: &[u16], px: i32, wt: i32| CreateFontW(-sc(px), 0, 0, 0, wt, 0, 0, 0, 1, 0, 0, 5, 0, f.as_ptr());
-    let (f_txt, f_small, f_glyph, f_bold, f_vol) = (font(&face, 13, 400), font(&face, 12, 400), font(&gface, 16, 400), font(&face, 13, 600), font(&gface, 19, 400));
+    let (f_txt, f_small, f_glyph, f_bold, f_vol) = (font(&face, 13, 400), font(&face, 12, 400), font(&gface, 16, 400), font(&face, 13, 600), font(&gface, 18, 400));
     let of = SelectObject(dc, f_txt);
 
     let l = layout(cr.right);
@@ -2593,27 +2593,26 @@ unsafe fn paint(hwnd: HWND) {
     if tg > 0.01 || pg > 0.0 {
         fill(dc, grp, mix(mix(pal().bg, pal().hover, tg), pal().accent, 0.5 * pg), sc(8));
     }
-    let mut x = tb.left + sc(10);
+    let x = tb.left + sc(10);
     text(dc, &lang_name(), cell(x, sc(34)), pal().text, DT_LEFT);
-    x += sc(34);
-    net_icon(dc, x + sc(15), mid, sc(15), f_glyph);
-    x += sc(32);
+    // the three icons share one ink height (~20 physical px) and even gaps, so their tops and bottoms line up
+    net_icon(dc, tb.left + sc(57), mid, sc(17), f_glyph);
     SelectObject(dc, f_vol); // a bigger font: the MDL2 speaker glyphs have more whitespace than the wifi arcs, so at the nominal size they read smaller
     let (vol, muted) = VOL.get();
     let vg = if muted || vol == 0 { "\u{E74F}" } else if vol < 34 { "\u{E993}" } else if vol < 67 { "\u{E994}" } else { "\u{E995}" };
-    text(dc, vg, cell(x + sc(5), sc(20)), if muted { BAD } else { pal().text }, DT_CENTER);
-    x += sc(28);
+    text(dc, vg, cell(tb.left + sc(74), sc(20)), if muted { BAD } else { pal().text }, DT_CENTER);
+    let bx = tb.left + sc(100);
     let (pct, ac) = BAT.get();
     if pct >= 0 {
         // the percentage lives INSIDE the battery body (phone-style); wifi / volume / battery share one size
         let col = if ac { GOOD } else if pct <= 15 { BAD } else { pal().text };
         let (bw, bh) = (sc(30), sc(16));
         let by = mid - bh / 2;
-        fill(dc, RECT { left: x, top: by, right: x + bw, bottom: by + bh }, col, sc(4)); // body outline
-        fill(dc, RECT { left: x + sc(2), top: by + sc(2), right: x + bw - sc(2), bottom: by + bh - sc(2) }, mix(pal().bg, pal().hover, tg), sc(3));
+        fill(dc, RECT { left: bx, top: by, right: bx + bw, bottom: by + bh }, col, sc(4)); // body outline
+        fill(dc, RECT { left: bx + sc(2), top: by + sc(2), right: bx + bw - sc(2), bottom: by + bh - sc(2) }, mix(pal().bg, pal().hover, tg), sc(3));
         SelectObject(dc, f_small);
-        text(dc, &pct.to_string(), RECT { left: x + sc(2), top: by, right: x + bw - sc(2), bottom: by + bh }, col, DT_CENTER); // the number IS the fill
-        fill(dc, RECT { left: x + bw + sc(1), top: by + sc(3), right: x + bw + sc(3), bottom: by + bh - sc(3) }, col, sc(1)); // terminal nub
+        text(dc, &pct.to_string(), RECT { left: bx + sc(2), top: by, right: bx + bw - sc(2), bottom: by + bh }, col, DT_CENTER); // the number IS the fill
+        fill(dc, RECT { left: bx + bw + sc(1), top: by + sc(3), right: bx + bw + sc(3), bottom: by + bh - sc(3) }, col, sc(1)); // terminal nub
     }
 
     // show-desktop placeholder at the very end: a mini Win-logo, single click shows the desktop
