@@ -1602,7 +1602,7 @@ fn layout(w: i32) -> Layout {
     let gap = sc(4);
     let desk = (w - sc(40), w - sc(4));
     let clock = (desk.0 - sc(4) - sc(90), desk.0 - sc(4));
-    let sys = (clock.0 - sc(4) - sc(106 + if BAT.get().0 >= 0 { 74 } else { 0 }), clock.0 - sc(4));
+    let sys = (clock.0 - sc(4) - sc(106 + if BAT.get().0 >= 0 { 48 } else { 0 }), clock.0 - sc(4));
     let apps = (sys.0 - sc(24) * tray_count() as i32, sys.0);
     // Start at the very head, the search slot and the rest packed right after it
     let x0 = sc(6);
@@ -1799,13 +1799,14 @@ unsafe fn paint_v(hwnd: HWND) {
                 glow(dc, BAT_I, hot == BAT_I, row, pal().bg, pal().hover, sc(8));
                 let (pct, ac) = BAT.get();
                 if pct >= 0 {
+                    // the percentage lives inside the battery body, same style as the horizontal bar
                     let col = if ac { GOOD } else if pct <= 15 { BAD } else { pal().text };
-                    let (bw2, bh2) = (sc(22), sc(11));
+                    let (bw2, bh2) = (sc(36), sc(16));
                     let (bx0, by0) = (cx - bw2 / 2, mid - bh2 / 2);
-                    fill(dc, RECT { left: bx0, top: by0, right: bx0 + bw2, bottom: by0 + bh2 }, col, sc(4)); // outline
-                    fill(dc, RECT { left: bx0 + sc(1), top: by0 + sc(1), right: bx0 + bw2 - sc(1), bottom: by0 + bh2 - sc(1) }, pal().bg, sc(3));
-                    let fw = ((bw2 - sc(4)) * pct / 100).max(sc(1));
-                    fill(dc, RECT { left: bx0 + sc(2), top: by0 + sc(2), right: bx0 + sc(2) + fw, bottom: by0 + bh2 - sc(2) }, col, sc(2));
+                    fill(dc, RECT { left: bx0, top: by0, right: bx0 + bw2, bottom: by0 + bh2 }, col, sc(4)); // body outline
+                    fill(dc, RECT { left: bx0 + sc(2), top: by0 + sc(2), right: bx0 + bw2 - sc(2), bottom: by0 + bh2 - sc(2) }, pal().bg, sc(3));
+                    SelectObject(dc, f_small);
+                    text(dc, &pct.to_string(), RECT { left: bx0 + sc(2), top: by0, right: bx0 + bw2 - sc(2), bottom: by0 + bh2 }, col, DT_CENTER);
                 }
             }
             CLOCK => {
@@ -2595,24 +2596,24 @@ unsafe fn paint(hwnd: HWND) {
     let mut x = tb.left + sc(10);
     text(dc, &lang_name(), cell(x, sc(34)), pal().text, DT_LEFT);
     x += sc(42);
-    net_icon(dc, x + sc(9), mid, sc(17), f_glyph);
+    net_icon(dc, x + sc(8), mid, sc(15), f_glyph);
     x += sc(32);
     SelectObject(dc, f_glyph);
     let (vol, muted) = VOL.get();
     let vg = if muted || vol == 0 { "\u{E74F}" } else if vol < 34 { "\u{E993}" } else if vol < 67 { "\u{E994}" } else { "\u{E995}" };
-    text(dc, vg, cell(x, sc(22)), if muted { BAD } else { pal().text }, DT_CENTER);
+    text(dc, vg, cell(x, sc(20)), if muted { BAD } else { pal().text }, DT_CENTER);
     x += sc(32);
     let (pct, ac) = BAT.get();
     if pct >= 0 {
+        // the percentage lives INSIDE the battery body (phone-style); wifi / volume / battery share one size
         let col = if ac { GOOD } else if pct <= 15 { BAD } else { pal().text };
-        let (bw, bh, by) = (sc(22), sc(11), mid - sc(5));
-        fill(dc, RECT { left: x, top: by, right: x + bw, bottom: by + bh }, col, sc(4)); // outline
-        fill(dc, RECT { left: x + sc(1), top: by + sc(1), right: x + bw - sc(1), bottom: by + bh - sc(1) }, mix(pal().bg, pal().hover, tg), sc(3));
-        let fw = ((bw - sc(4)) * pct / 100).max(sc(1));
-        fill(dc, RECT { left: x + sc(2), top: by + sc(2), right: x + sc(2) + fw, bottom: by + bh - sc(2) }, col, sc(2));
-        fill(dc, RECT { left: x + bw + sc(1), top: by + sc(3), right: x + bw + sc(3), bottom: by + bh - sc(3) }, col, sc(1)); // terminal nub
-        SelectObject(dc, f_txt);
-        text(dc, &format!("{pct}%"), cell(x + bw + sc(8), sc(40)), pal().text, DT_LEFT);
+        let (bw, bh) = (sc(38), sc(18));
+        let by = mid - bh / 2;
+        fill(dc, RECT { left: x, top: by, right: x + bw, bottom: by + bh }, col, sc(5)); // body outline
+        fill(dc, RECT { left: x + sc(2), top: by + sc(2), right: x + bw - sc(2), bottom: by + bh - sc(2) }, mix(pal().bg, pal().hover, tg), sc(3));
+        SelectObject(dc, f_small);
+        text(dc, &pct.to_string(), RECT { left: x + sc(3), top: by, right: x + bw - sc(4), bottom: by + bh }, col, DT_CENTER); // the number IS the fill
+        fill(dc, RECT { left: x + bw + sc(1), top: by + sc(4), right: x + bw + sc(3), bottom: by + bh - sc(4) }, col, sc(1)); // terminal nub
     }
 
     // show-desktop placeholder at the very end: a mini Win-logo, single click shows the desktop
