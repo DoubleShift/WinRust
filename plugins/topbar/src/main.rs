@@ -421,7 +421,7 @@ fn migrate_cfg() {
         .filter_map(|l| l.rsplit_once('\t'))
         .filter_map(|(k, n)| n.trim().parse::<u32>().ok().map(|c| (k.to_string(), serde_json::Value::from(c))))
         .collect();
-    let cfg = serde_json::json!({ "theme": theme, "dock": dock, "order": order, "start": start, "usage": usage });
+    let cfg = serde_json::json!({ "theme": theme, "dock": dock, "pins": order, "start": start, "usage": usage });
     if let Ok(s) = serde_json::to_string_pretty(&cfg) {
         let _ = std::fs::write(&p, s);
     }
@@ -457,9 +457,6 @@ fn bump_name(name: &str) {
         v
     };
     cfg_set("usage", v.into());
-}
-fn lnk_uses(lnk: &std::path::Path) -> u32 {
-    uses(&lnk.file_stem().unwrap_or_default().to_string_lossy().to_lowercase())
 }
 
 thread_local! {
@@ -1262,25 +1259,52 @@ unsafe fn fix_msix_pin(lnk: &[u16], target: &str) -> Option<String> {
 }
 
 /// Pinned apps (the .lnk files Windows keeps for the taskbar) with their icons and target exe.
-/// The user's own drag order (topbar-order.txt next to the exe) comes first; the rest follow by launch count.
+/// The pinned-app buttons: the "pins" list in taskbar.json is the authoritative content and order (any
+/// existing path — .lnk shortcuts or plain exes). Shortcuts found in the Windows Quick Launch folder are
+/// imported (appended) so pins made through Explorer's own UI show up too.
 unsafe fn load_pins() {
-    let Some(appdata) = std::env::var_os("APPDATA") else { return };
-    let dir = PathBuf::from(appdata).join(r"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar");
-    let mut files: Vec<_> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lnk"))).collect();
-    files.sort();
-    files.sort_by_key(|f| std::cmp::Reverse(lnk_uses(f))); // most used first (stable: ties stay alphabetical)
-    for f in files {
+    let mut want: Vec<PathBuf> = cfg_arr("pins").into_iter().chain(cfg_arr("order")).map(PathBuf::from).collect();
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let dir = PathBuf::from(appdata).join(r"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar");
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk")) && !want.contains(&p) {
+                want.push(p);
+            }
+        }
+    }
+    let mut uniq: Vec<PathBuf> = Vec::new();
+    for p in want {
+        if p.exists() && !uniq.contains(&p) {
+            uniq.push(p);
+        }
+    }
+    for f in &uniq {
         let lnk = wide(&f.to_string_lossy());
-        let target = lnk_target(&lnk);
-        let target = fix_msix_pin(&lnk, &target).unwrap_or(target);
-        let icon = lnk_icon(&lnk, &target);
+        let is_lnk = f.extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk"));
+        let (target, icon) = if is_lnk {
+            let t = lnk_target(&lnk);
+            let t = fix_msix_pin(&lnk, &t).unwrap_or(t);
+            let icon = lnk_icon(&lnk, &t);
+            (t, icon)
+        } else {
+            (f.to_string_lossy().to_lowercase(), item_icon(&f.to_string_lossy(), icon_px()))
+        };
         PINS.with_borrow_mut(|p| p.push(Pin { lnk, target, icon }));
     }
-    let order = std::fs::read_to_string(appdata_file("topbar-order.txt")).unwrap_or_default();
-    let order: Vec<String> = order.lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
-    PINS.with_borrow_mut(|p| {
-        p.sort_by_key(|pin| order.iter().position(|o| o.eq_ignore_ascii_case(&wstr_of(&pin.lnk))).unwrap_or(usize::MAX)); // stable: unlisted pins keep the usage order
-    });
+    save_pins_cfg();
+}
+
+/// Mirrors the current pinned buttons into taskbar.json ("pins", the authoritative ordered list) and
+/// drops the legacy "order" field.
+fn save_pins_cfg() {
+    let mut v = load_cfg();
+    if let Some(o) = v.as_object_mut() {
+        let pins: Vec<serde_json::Value> = PINS.with_borrow(|p| p.iter().map(|x| serde_json::Value::from(wstr_of(&x.lnk))).collect());
+        o.insert("pins".into(), serde_json::Value::Array(pins));
+        o.remove("order");
+    }
+    save_cfg(&v);
 }
 
 fn refresh_buttons() {
@@ -1910,7 +1934,7 @@ unsafe fn move_btn(i: usize, j: usize) {
             let b = (j - 1).min(p.len());
             p.insert(b, it);
         });
-        let _ = std::fs::write(appdata_file("topbar-order.txt"), PINS.with_borrow(|p| p.iter().map(|x| wstr_of(&x.lnk)).collect::<Vec<_>>().join("\n")));
+        save_pins_cfg();
         refresh_buttons();
     } else {
         ORDER.with_borrow_mut(|o| {
@@ -2789,6 +2813,7 @@ unsafe fn unpin(i: usize) {
     let n = p.lnk.iter().position(|&c| c == 0).unwrap_or(p.lnk.len());
     let _ = std::fs::remove_file(String::from_utf16_lossy(&p.lnk[..n]));
     DestroyIcon(p.icon);
+    save_pins_cfg();
 }
 
 /// Pins a running app: a shortcut to its exe in the folder where Windows keeps taskbar pins.
@@ -2812,6 +2837,7 @@ unsafe fn pin_exe(path: &str) {
     if ok.is_some() {
         let icon = lnk_icon(&lnk, exe);
         PINS.with_borrow_mut(|p| p.push(Pin { lnk, target: exe.to_string(), icon }));
+        save_pins_cfg();
     }
 }
 
