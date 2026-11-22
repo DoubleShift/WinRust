@@ -47,6 +47,7 @@ pub fn zh(en: &str) -> &'static str {
         ("Close all windows", "关闭全部窗口"),
         ("Dark theme", "深色主题"),
         ("Light theme", "浅色主题"),
+        ("Restore the Windows default taskbar", "还原 Windows 默认任务栏"),
         ("This PC", "此电脑"),
         ("Documents", "文档"),
         ("Pictures", "图片"),
@@ -2926,6 +2927,7 @@ unsafe fn bar_menu(x: i32, y: i32) {
     }
     items.push(fly::MItem::new(t!("Тёмная тема", "Dark theme")).on(theme() == Theme::Dark).sep());
     items.push(fly::MItem::new(t!("Светлая тема", "Light theme")).on(theme() == Theme::Light));
+    items.push(fly::MItem::new(t!("Вернуть панель Windows по умолчанию", "Restore the Windows default taskbar")).sep());
     items.push(fly::MItem::new(t!("Закрыть панель", "Close the bar")).danger());
     let head = (null_mut(), "\u{E713}", t!("Настройки", "Settings").to_string(), t!("Where the bar docks and its look", "Where the bar docks and its look").to_string());
     fly::menu(x, y, Some(head), items, move |i| unsafe {
@@ -2949,7 +2951,16 @@ unsafe fn bar_menu(x: i32, y: i32) {
                 InvalidateRect(BAR.load(Relaxed) as HWND, null(), 0);
                 bar_menu(x, y);
             }
-            8 => _ = PostMessageW(FindWindowW(wide("topbar").as_ptr(), null()), WM_CLOSE, 0, 0), // quits the bar, brings the Windows taskbar back
+            8 => {
+                // full revert: the stock taskbar back to the Windows-default state, then this bar quits
+                show_taskbar(ABS_ALWAYSONTOP as usize);
+                if find_other("Shell_TrayWnd").is_null() {
+                    set_work_area(RECT { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) });
+                }
+                announce();
+                _ = PostMessageW(FindWindowW(wide("topbar").as_ptr(), null()), WM_CLOSE, 0, 0);
+            }
+            9 => _ = PostMessageW(FindWindowW(wide("topbar").as_ptr(), null()), WM_CLOSE, 0, 0), // quits the bar, brings the Windows taskbar back
             _ => {}
         }
     });
